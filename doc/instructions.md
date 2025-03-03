@@ -1,4 +1,3 @@
-
 # Insturctions
 
 ## Bytecode insturctions
@@ -70,6 +69,11 @@ If the score does not exist it defaults to 0.
 #### reset \<target> \<objective>
 
 Delete all matching values.
+
+#### store (result|success) score <targets> <objective>
+
+Executes a command and stores its outcome into a scoreboard entry.
+Use "result" to store the numerical result of the command or "success" to store whether it executed successfully.
 
 ### Output
 
@@ -148,3 +152,11 @@ If there are instructions after this instruction they will be executed with the 
 #### run_func <func name>
 
 Creates a new branch that immediately executes the function identified by <func name>.
+
+#### return [fail] <value>
+
+Returns the value.
+
+#### return run <subcommand>
+
+Run subcommand and return it's result.

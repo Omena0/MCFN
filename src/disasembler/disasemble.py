@@ -1,71 +1,73 @@
-from enum import IntEnum
+from enum import IntEnum, auto
 from io import BytesIO
 import struct
 import zlib
 import sys
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 
 class Instruction(IntEnum):
     # Executor instructions (from "as <entity>" and "at <entity>")
-    execute_as = 1
-    execute_at = 2
-    positioned = 3
+    execute_as = auto()
+    execute_at = auto()
+    execute_store = auto()
+    positioned = auto()
 
     # Conditionals (commands: if block/entity/score, unless block/entity/score)
-    if_block = 4
-    if_entity = 5
-    if_score = 6
-    unless_block = 7
-    unless_entity = 8
-    unless_score = 9
+    if_block = auto()
+    if_entity = auto()
+    if_score = auto()
+    unless_block = auto()
+    unless_entity = auto()
+    unless_score = auto()
 
     # Scoreboards
-    add = 10
-    remove = 11
-    list_scores = 12
-    list_objectives = 13
-    set_score = 14
-    get = 15
-    operation = 16
-    reset = 17
+    add = auto()
+    remove = auto()
+    list_scores = auto()
+    list_objectives = auto()
+    set_score = auto()
+    get = auto()
+    operation = auto()
+    reset = auto()
 
     # Output
-    say = 18
-    tellraw = 19
+    say = auto()
+    tellraw = auto()
 
     # Blocks
-    setblock = 12
-    fill = 21
-    clone = 22
+    setblock = auto()
+    fill = auto()
+    clone = auto()
 
     # Data
-    get_block = 23
-    get_entity = 24
-    merge_block = 25
-    merge_entity = 26
+    get_block = auto()
+    get_entity = auto()
+    merge_block = auto()
+    merge_entity = auto()
 
     # Random
-    random = 27
+    random = auto()
 
     # Entities
-    summon = 28
-    kill = 29
+    summon = auto()
+    kill = auto()
 
     # Tag
-    tag_add = 30
-    tag_remove = 31
+    tag_add = auto()
+    tag_remove = auto()
 
     # Return
-    return_ = 32
-    return_fail = 33
-    return_run = 34
+    return_ = auto()
+    return_fail = auto()
+    return_run = auto()
 
     # Kill branch
-    kill_branch = 35
+    kill_branch = auto()
 
     # Function execution: creates a new branch to run a function immediately.
-    run_func = 36
+    run_func = auto()
+
 
 STYLES = ["bold", "italic", "strikethrough", "underlined"]
 

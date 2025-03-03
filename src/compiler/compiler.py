@@ -1,5 +1,6 @@
-from enum import IntEnum
+from enum import IntEnum, auto
 from io import BytesIO
+import logging
 import pickle
 import struct
 import zlib
@@ -7,22 +8,45 @@ import json
 import sys
 import os
 
+os.system('')
+
 MAGIC = b'MCFN'
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 
-logging = False
+level = logging.DEBUG
 
-# Logging init
-if logging:
-    logpath = os.path.join(os.getenv('userprofile'),"desktop",'processor.log')
+class CustomFormatter(logging.Formatter):
+    grey = "\x1b[38;20m"
+    light_green = "\x1b[92m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    format = "%(levelname)6s: %(message)s"
 
-    with open(logpath, 'w') as f:
-        f.write('')
+    FORMATS = {
+        logging.DEBUG: grey + format + reset,
+        logging.INFO: light_green + format + reset,
+        logging.WARNING: yellow + format + reset,
+        logging.ERROR: red + format + reset,
+        logging.CRITICAL: bold_red + format + reset
+    }
 
-def log(line:str):
-    if not logging: return
-    with open(logpath, 'a') as f:
-        f.write(line + '\n')
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+log = logging.getLogger("MCFN")
+log.setLevel(logging.DEBUG)
+
+# create console handler with a higher log level
+ch = logging.StreamHandler()
+ch.setLevel(level)
+
+ch.setFormatter(CustomFormatter())
+
+log.addHandler(ch)
 
 ### Preprocessor ###
 def get_indent(line:str):
@@ -61,7 +85,7 @@ def flatten(indented_lines, level):
     chain = [indented_lines[i].strip() for i in range(level+1) if indented_lines[i].strip()]
     result = " ".join(chain)
     if result.lstrip().startswith('$'):
-        result = '$' + result.strip()[1:]
+        result = f'${result.strip()[1:]}'
     return result
 
 def preprocess(source:str, name:str):
@@ -80,113 +104,108 @@ def preprocess(source:str, name:str):
             buffer += line
             joined_lines.append(buffer)
             buffer = ""
-
-    new_lines = joined_lines
-
-    # Multiline pass
-    log(f'# {name}')
+    
+    # Use the joined_lines as base but then build a new final_lines list
+    final_lines = []
 
     # Store the most recent line for each indent level
     indented_lines = [""] * 20
-    # Process with index to allow lookahead.
-    for i, original_line in enumerate(source.splitlines()):
+    all_lines = source.splitlines()  # using original source lines for indentation
+    for i, original_line in enumerate(all_lines):
         if not original_line.strip() or original_line.strip().startswith('#'):
             continue
 
-        log(f'# {original_line}')
-        line = original_line.replace('###','´´´').replace('##','´´').split('# ')[0].replace('´','#').rstrip('\\')  # Strip trailing backslash
-        indent = get_indent(line)
-        level = indent // 4  # or use another factor if your indentation is different
-
-        # Place this line at the current indent level
+        line = original_line.replace('###','´´´').replace('##','´´').split('# ')[0].replace('´','#').rstrip('\\')
+        indent = len(line) - len(line.lstrip(' '))
+        level = indent // 4
         indented_lines[level] = line
         # Clear deeper levels
         for j in range(level+1, len(indented_lines)):
             indented_lines[j] = ""
-
+        
         # Lookahead for the next non-skipped line
         next_level = None
-        for j in range(i+1, len(source.splitlines())):
-            next_line = source.splitlines()[j]
-            if not next_line or next_line.startswith('#'):
+        for j in range(i+1, len(all_lines)):
+            next_line = all_lines[j]
+            if not next_line.strip() or next_line.strip().startswith('#'):
                 continue
             next_line = next_line.split('#')[0].rstrip('\\')
-            next_indent = get_indent(next_line)
+            next_indent = len(next_line) - len(next_line.lstrip(' '))
             next_level = next_indent // 4
             break
-
-        # Only output if no following line increases the indent,
-        # meaning the current line is not just a prefix.
+        
+        # Only output if no following line increases the indent
         if next_level is None or next_level <= level:
-            out_line = flatten(indented_lines, level)
-            log(out_line)
-            new_lines.append(out_line)
-
-    return '\n'.join(new_lines)
+            out_line = " ".join(indented_lines[k].strip() for k in range(level+1) if indented_lines[k].strip())
+            final_lines.append(out_line)
+    
+    # Return the final preprocessed source (using only final_lines)
+    return '\n'.join(final_lines)
 
 ### Compiler ###
 class Instruction(IntEnum):
     # Executor instructions (from "as <entity>" and "at <entity>")
-    execute_as = 1
-    execute_at = 2
-    positioned = 3
+    execute_as = auto()
+    execute_at = auto()
+    execute_store = auto()
+    positioned = auto()
 
     # Conditionals (commands: if block/entity/score, unless block/entity/score)
-    if_block = 4
-    if_entity = 5
-    if_score = 6
-    unless_block = 7
-    unless_entity = 8
-    unless_score = 9
+    if_block = auto()
+    if_entity = auto()
+    if_score = auto()
+    unless_block = auto()
+    unless_entity = auto()
+    unless_score = auto()
 
     # Scoreboards
-    add = 10
-    remove = 11
-    list_scores = 12
-    list_objectives = 13
-    set_score = 14
-    get = 15
-    operation = 16
-    reset = 17
+    add = auto()
+    remove = auto()
+    list_scores = auto()
+    list_objectives = auto()
+    set_score = auto()
+    get = auto()
+    operation = auto()
+    reset = auto()
 
     # Output
-    say = 18
-    tellraw = 19
+    say = auto()
+    tellraw = auto()
 
     # Blocks
-    setblock = 12
-    fill = 21
-    clone = 22
+    setblock = auto()
+    fill = auto()
+    clone = auto()
 
     # Data
-    get_block = 23
-    get_entity = 24
-    merge_block = 25
-    merge_entity = 26
+    get_block = auto()
+    get_entity = auto()
+    merge_block = auto()
+    merge_entity = auto()
 
     # Random
-    random = 27
+    random = auto()
 
     # Entities
-    summon = 28
-    kill = 29
+    summon = auto()
+    kill = auto()
 
     # Tag
-    tag_add = 30
-    tag_remove = 31
+    tag_add = auto()
+    tag_remove = auto()
 
     # Return
-    return_ = 32
-    return_fail = 33
-    return_run = 34
+    return_ = auto()
+    return_fail = auto()
+    return_run = auto()
 
     # Kill branch
-    kill_branch = 35
+    kill_branch = auto()
 
     # Function execution: creates a new branch to run a function immediately.
-    run_func = 36
+    run_func = auto()
 
-def compile_component(comp: dict) -> bytes:
+def compile_component(comp: dict) -> bytes:  # sourcery skip: low-code-quality
     """
     Compiles a single Minecraft JSON component into a binary format.
 
@@ -308,7 +327,7 @@ def compile_minecraft_json(json_text: str) -> bytes:
         data = json.loads(json_text)
     except json.JSONDecodeError as e:
         # Always propagate JSON decoding errors.
-        raise ValueError(f"Invalid JSON data: {e}\nData: {json_text}")
+        raise ValueError(f"Invalid JSON data: {e}\nData: {json_text}") from e
 
     try:
         compiled = bytearray()
@@ -342,8 +361,22 @@ def compile_minecraft_json(json_text: str) -> bytes:
         # use the original string pickled.
         pickled = pickle.dumps(json_text)
         if len(pickled) > 255:
-            raise ValueError("Pickled data too long.")
+            raise ValueError("Pickled data too long.") from e
         return struct.pack("B", 0) + struct.pack("B", len(pickled)) + pickled
+
+def get_arg_letter(i: int) -> str:
+    """
+    Returns a letter (or two letters) based on the 0-indexed argument position.
+    Example: 0 -> "a", 1 -> "b", …, 25 -> "z", 26 -> "aa", 27 -> "ab", etc.
+    """
+    base = 26
+    if i < base:
+        return chr(ord('a') + i)
+    else:
+        # Compute two-letter key. (For positions > 25, this can be extended as needed.)
+        first = (i // base) - 1
+        second = i % base
+        return chr(ord('a') + first) + chr(ord('a') + second)
 
 def compile_instr(cmd: str, args: list) -> bytes:
     """
@@ -352,37 +385,42 @@ def compile_instr(cmd: str, args: list) -> bytes:
     local = bytearray()
     try:
         instr_code = Instruction[cmd]
-
     except KeyError:
-        return b'' # Drop instruction
+        return b''  # Drop instruction
 
     if len(args) > 255:
-        raise ValueError("Too many arguments in instruction.")
+        log.error(f'Ignoring invalid command: {cmd} {args}')
+        log.error("Too many arguments in instruction.")
+        return b''
 
     local += struct.pack("B", len(args))
     local += struct.pack("B", instr_code.value)
 
     for arg in args:
-        # For tellraw commands, compile the JSON argument to binary.
-        if instr_code == Instruction.tellraw and arg.lstrip().startswith(('{', '[')):
-            try:
-                arg_bytes = compile_minecraft_json(arg)
-
-            except:
-                return b'' # Drop instruction
-
+        # If the argument is already a bytes object, use it directly.
+        if isinstance(arg, bytes):
+            arg_bytes = arg
         else:
-            arg_bytes = arg.encode('utf-8')
+            # For tellraw commands, compile the JSON argument to binary.
+            if instr_code == Instruction.tellraw and arg.lstrip().startswith(('{', '[')):
+                try:
+                    arg_bytes = compile_minecraft_json(arg)
+                except:
+                    return b''  # Drop instruction
+            else:
+                arg_bytes = arg.encode('utf-8')
 
         if len(arg_bytes) > 255:
-            raise ValueError("Argument too long.")
+            log.error(f'Ignoring invalid command: {cmd} {args}')
+            log.error(f"Argument too long. [{len(arg_bytes)}/255]")
+            return b''
 
         local += struct.pack("B", len(arg_bytes))
         local += arg_bytes
 
     return bytes(local)
 
-def compile_source(source):
+def compile_source(func_name, source):  # sourcery skip: low-code-quality
     """
     Compiles the Minecraft .mcfunction source into a binary executable.
     Each instruction is stored as:
@@ -390,12 +428,37 @@ def compile_source(source):
     """
     compiled = bytearray()
     lines = source.splitlines()
+    # Process each line.
+    if func_name:
+        log.info(f'Compiling: {func_name}')
+
     for line in lines:
+        # Remove any trailing newline and spaces.
         line = line.strip()
+        if not line:
+            continue
+
+        log.debug(f'Compiling: {line}')
+
+        # NEW: if the line is a vanilla macro line (starts with "$"), remove the dollar.
+        if line.lstrip().startswith('$'):
+            line = line.removeprefix('$')
+            for macro in line.split('$(')[1:]:
+                macro = macro.split(')',1)[0]
+                func_name = func_name.replace(f'{namespace}/','').removesuffix('.mcfunction')
+                if func_name not in args_map:
+                    log.error(f'Function {func_name} not found.')
+
+                final = args_map[func_name].get(macro)
+                if final is None:
+                    log.error(f'Variable {macro} was not supplied in the function call to {func_name}')
+
+                line = line.replace(f'$({macro})', f'$({final})')
+
         if not line or line.startswith('#'):
             continue
-        tokens = line.split()
 
+        tokens = line.split()
         # --- Execute Command Support ---
         if tokens[0].lower() == "execute":
             i = 1
@@ -407,83 +470,122 @@ def compile_source(source):
                 if token == "as":
                     i += 1
                     if i >= len(tokens):
-                        raise ValueError("Missing selector after 'as'")
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Missing selector after 'as'")
+                        continue
+
                     selector = tokens[i]
                     exec_instructions += compile_instr("execute_as", [selector])
                     i += 1
+
                 elif token == "at":
                     i += 1
                     if i >= len(tokens):
-                        raise ValueError("Missing selector after 'at'")
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Missing selector after 'at'")
+                        continue
+
                     selector = tokens[i]
                     exec_instructions += compile_instr("execute_at", [selector])
                     i += 1
+
                 elif token == "positioned":
                     # Expect three arguments: <x> <y> <z>
                     if i + 3 >= len(tokens):
-                        raise ValueError("Missing coordinates after 'positioned'")
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Missing coordinates after 'positioned'")
+                        continue
+
                     x = tokens[i+1]
                     y = tokens[i+2]
                     z = tokens[i+3]
                     exec_instructions += compile_instr("positioned", [x, y, z])
                     i += 4
+
                 elif token == "if":
                     i += 1
                     if i >= len(tokens):
-                        raise ValueError("Missing condition type after 'if'")
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Missing condition type after 'if'")
+                        continue
+
                     condition = tokens[i].lower()
                     i += 1
                     if condition == "block":
                         # Syntax: if block <x> <y> <z> <block>
                         if i + 3 >= len(tokens):
-                            raise ValueError("Incomplete 'if block' condition")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error("Incomplete 'if block' condition")
+                            continue
+
                         bx = tokens[i]; by = tokens[i+1]; bz = tokens[i+2]
                         block_id = tokens[i+3]
                         exec_instructions += compile_instr("if_block", [bx, by, bz, block_id])
                         i += 4
+
                     elif condition == "entity":
                         # Syntax: if entity <selector>
                         if i >= len(tokens):
-                            raise ValueError("Missing selector after 'if entity'")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error("Missing selector after 'if entity'")
+                            continue
+
                         selector_if = tokens[i]
                         exec_instructions += compile_instr("if_entity", [selector_if])
                         i += 1
+
                     elif condition == "score":
                         # Supports two syntaxes:
                         # A) Using "matches": if score <selector> <objective> matches <range>
                         # B) Using a relational operator: if score <selector> <objective> <op> <comp_selector> <comp_objective>
                         if i + 3 >= len(tokens):
-                            raise ValueError("Incomplete 'if score' condition")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error("Incomplete 'if score' condition")
+                            continue
+
                         score_selector = tokens[i]
                         objective = tokens[i+1]
                         operator = tokens[i+2].lower()
                         valid_ops = {"matches", ">", "<", ">=", "<=", "==", "!="}
                         if operator not in valid_ops:
-                            raise ValueError(f"Expected comparison operator in 'if score' condition, got {tokens[i+2]}")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error(f"Expected comparison operator in 'if score' condition, got {tokens[i+2]}")
+                            continue
+
                         if operator == "matches":
                             range_spec = tokens[i+3]
                             exec_instructions += compile_instr("if_score", [score_selector, objective, "matches", range_spec])
                             i += 4
                         else:
                             if i + 4 >= len(tokens):
-                                raise ValueError("Incomplete 'if score' condition for operator")
+                                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                                log.error("Incomplete 'if score' condition for operator")
+                                continue
+
                             comp_selector = tokens[i+3]
                             comp_objective = tokens[i+4]
                             exec_instructions += compile_instr("if_score", [score_selector, objective, operator, comp_selector, comp_objective])
                             i += 5
                     else:
-                        raise ValueError(f"Unsupported if-condition type: {condition}")
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error(f"Unsupported if-condition type: {condition}")
+                        continue
 
                 elif token == "unless":
                     i += 1
                     if i >= len(tokens):
-                        raise ValueError("Missing condition type after 'unless'")
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Missing condition type after 'unless'")
+                        continue
                     condition = tokens[i].lower()
                     i += 1
                     if condition == "block":
                         # Syntax: unless block <x> <y> <z> <block>
                         if i + 3 >= len(tokens):
-                            raise ValueError("Incomplete 'unless block' condition")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error("Incomplete 'unless block' condition")
+                            continue
+
                         bx = tokens[i]; by = tokens[i+1]; bz = tokens[i+2]
                         block_id = tokens[i+3]
                         exec_instructions += compile_instr("unless_block", [bx, by, bz, block_id])
@@ -491,45 +593,94 @@ def compile_source(source):
                     elif condition == "entity":
                         # Syntax: unless entity <selector>
                         if i >= len(tokens):
-                            raise ValueError("Missing selector after 'unless entity'")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error("Missing selector after 'unless entity'")
+                            continue
+
                         selector_unless = tokens[i]
                         exec_instructions += compile_instr("unless_entity", [selector_unless])
                         i += 1
                     elif condition == "score":
                         # Supports two syntaxes for unless score as well.
                         if i + 3 >= len(tokens):
-                            raise ValueError("Incomplete 'unless score' condition")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error("Incomplete 'unless score' condition")
+                            continue
+
                         score_selector = tokens[i]
                         objective = tokens[i+1]
                         operator = tokens[i+2].lower()
                         valid_ops = {"matches", ">", "<", ">=", "<=", "==", "!="}
                         if operator not in valid_ops:
-                            raise ValueError(f"Expected comparison operator in 'unless score' condition, got {tokens[i+2]}")
+                            log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                            log.error(f"Expected comparison operator in 'unless score' condition, got {tokens[i+2]}")
+                            continue
+
                         if operator == "matches":
                             range_spec = tokens[i+3]
                             exec_instructions += compile_instr("unless_score", [score_selector, objective, "matches", range_spec])
                             i += 4
                         else:
                             if i + 4 >= len(tokens):
-                                raise ValueError("Incomplete 'unless score' condition for operator")
+                                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                                log.error("Incomplete 'unless score' condition for operator")
+                                continue
+
                             comp_selector = tokens[i+3]
                             comp_objective = tokens[i+4]
                             exec_instructions += compile_instr("unless_score", [score_selector, objective, operator, comp_selector, comp_objective])
                             i += 5
                     else:
-                        raise ValueError(f"Unsupported unless-condition type: {condition}")
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error(f"Unsupported unless-condition type: {condition}")
+                        continue
+
+                elif token == "store":
+                    i += 1
+                    if i >= len(tokens):
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Missing store type after 'store'")
+                        continue
+
+                    store_type = tokens[i].lower()
+                    if store_type not in ("result", "success"):
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Store type must be 'result' or 'success'")
+                        continue
+
+                    i += 1
+                    if i >= len(tokens) or tokens[i].lower() != "score":
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Expected 'score' after execute store <result|success>")
+                        continue
+
+                    i += 1
+                    if i + 1 >= len(tokens):
+                        log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                        log.error("Missing target or objective for execute store score")
+                        continue
+
+                    targets = tokens[i]
+                    objective = tokens[i+1]
+                    exec_instructions += compile_instr("execute_store", [store_type, targets, objective])
+                    i += 2
+
                 else:
-                    raise ValueError(f"Unexpected token in execute clause: {tokens[i]}")
+                    log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                    log.error(f"Unexpected token in execute clause: {tokens[i]}")
+                    continue
 
             # Expect the "run" keyword
             if i >= len(tokens) or tokens[i].lower() != "run":
-                raise ValueError("Missing 'run' keyword in execute command")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error("Missing 'run' keyword in execute command")
+                continue
 
             i += 1  # Skip the "run" token
             # The remainder forms the subcommand.
             subcommand = ' '.join(tokens[i:])
             # Compile the subcommand recursively.
-            subcmd_bytes = compile_source(subcommand)
+            subcmd_bytes = compile_source(None, subcommand)
             # Append the accumulator instructions, the subcommand and then "kill_branch".
             compiled += exec_instructions + subcmd_bytes + compile_instr("kill_branch", [])
             continue
@@ -540,9 +691,7 @@ def compile_source(source):
                 if len(tokens) >= 3 and tokens[2].lower() == "list":
                     cmd = "list_objectives"
                     args = []  # no additional arguments
-                else:
-                    # Ignore other objectives commands as scoreboards are auto‑created.
-                    continue
+
             elif tokens[1].lower() == "players":
                 subcmd = tokens[2].lower()
                 if subcmd == "set":
@@ -567,15 +716,21 @@ def compile_source(source):
                     cmd = "reset"
                     args = tokens[3:]
                 else:
-                    raise ValueError(f"Unsupported scoreboard players command: {line}")
+                    log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                    log.error(f"Unsupported scoreboard players command: {line}")
+                    continue
             else:
-                raise ValueError(f"Unsupported scoreboard command: {line}")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error(f"Unsupported scoreboard command: {line}")
+                continue
 
         # --- Output ---
         elif tokens[0].lower() == "tellraw":
             parts = line.split(None, 2)
             if len(parts) < 3:
-                raise ValueError("tellraw command requires a target and a JSON argument.")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error("tellraw command requires a target and a JSON argument.")
+                continue
             cmd = "tellraw"
             args = [parts[2].strip()]  # only the JSON text is compiled
 
@@ -590,30 +745,53 @@ def compile_source(source):
                 cmd = f"merge_{typ}"
                 args = tokens[3:]
             else:
-                raise ValueError(f"Invalid data command syntax: {line}")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error(f"Invalid data command syntax: {line}")
+                continue
 
         # --- Return Commands ---
         elif tokens[0].lower() == "return":
             if len(tokens) < 2:
-                raise ValueError("return command requires at least one argument")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error("return command requires at least one argument")
+                continue
             if tokens[1].lower() == "fail":
                 if len(tokens) != 3:
-                    raise ValueError("Usage: /return fail <fail status>")
+                    log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                    log.error("Usage: /return fail <fail status>")
+                    continue
                 cmd = "return_fail"
                 args = [tokens[2]]
+                compiled += compile_instr(cmd, args)
+
             elif tokens[1].lower() == "run":
                 if len(tokens) < 3:
-                    raise ValueError("Usage: /return run <command>")
-                cmd = "return_run"
-                args = [' '.join(tokens[2:])]
+                    log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                    log.error("Expecting subcommand at `/return run ...`")
+                    continue
+                if func_name == 'main':
+                    log.warning("/return run in main class. Did you really intend this?", SyntaxWarning)
+
+                # For "return run", compile the subcommand recursively,
+                # then output a return_run instruction (with no arguments),
+                # followed by the compiled subcommand and a kill_branch instruction.
+                subcommand = ' '.join(tokens[2:])
+                compiled_subcmd = compile_source(None, subcommand)
+                compiled += compile_instr("return_run", [])
+                compiled += compiled_subcmd + compile_instr("kill_branch", [])
+                continue  # Skip further processing of this line.
+
             else:
                 cmd = "return_"
                 args = tokens[1:]
+                compiled += compile_instr(cmd, args)
 
         # --- Tag Commands ---
         elif tokens[0].lower() == "tag":
             if len(tokens) < 3:
-                raise ValueError(f"Invalid tag command syntax: {line}")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error(f"Invalid tag command syntax: {line}")
+                continue
             if tokens[1].lower() == "add":
                 cmd = "tag_add"
                 args = tokens[2:]
@@ -621,14 +799,41 @@ def compile_source(source):
                 cmd = "tag_remove"
                 args = tokens[2:]
             else:
-                raise ValueError(f"Invalid tag command syntax: {line}")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error(f"Invalid tag command syntax: {line}")
+                continue
 
         # --- Function Command ---
         elif tokens[0].lower() == "function":
             if len(tokens) < 2:
-                raise ValueError("function command requires a function name")
+                log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                log.error(f'Function command requires at least 2 arguments.')
+                continue
+
             cmd = "run_func"
-            args = [' '.join(tokens[1:])]
+            rest = ' '.join(tokens[1:])
+
+            mapping = {}  # mapping from original names to positional letters
+            if '{' in rest:
+                idx = rest.index('{')
+                func_name = rest[:idx].strip().removesuffix('.mcfunction')
+                json_str = rest[idx:].strip()
+                try:
+                    func_args = json.loads(json_str)
+                    # Use the order in the function call JSON to create the mapping.
+                    for i, (orig, value) in enumerate(func_args.items()):
+                        mapping[orig] = get_arg_letter(i)
+                    # Build the argument list in the call order (ignoring the keys).
+                    arg_list = [str(func_args[orig]) for orig in func_args.keys()]
+                except Exception as e:
+                    log.error(f'Ignoring invalid command in {func_name}: "{line}"')
+                    log.error(f"Invalid JSON for function arguments: {json_str} [{e}]")
+                    continue
+                args = [func_name] + arg_list
+            else:
+                args = [rest]
+            args_map[func_name] = mapping
+            to_compile.append(func_name)
 
         # --- Default ---
         else:
@@ -640,36 +845,29 @@ def compile_source(source):
 
     return bytes(compiled)
 
-def compile_file(filename:str) -> bytes:
+def compile_file(filename:str, func_name:str) -> bytes:
     source = read_file(filename)
     source = preprocess(source, filename)
-    return compile_source(source)
+    return compile_source(func_name, source)
 
+args_map = {}
+compiled = []
+to_compile = ['main']
 def compile_files(path:str) -> dict:
     """Compile all leaf files in a directory"""
     functions = {}
+    while to_compile:
+        func = to_compile.pop(0)
 
-    # If path is a folder
-    if os.path.isdir(path):
-        # Loop all files
-        for file in os.listdir(path):
-            # Convert to path and replace backslashes
-            file = os.path.join(path,file).replace('\\','/')
+        if func in compiled:
+            log.debug(f"Already compiled {func}")
+            continue
 
-            # Recurse if dir
-            if os.path.isdir(file):
-                functions.update(compile_files(file))
+        filename = os.path.join(path, f'{func}.mcfunction')
+        filename = filename.replace('\\','/')
 
-            else:
-                # Ignore if not .mcfunction
-                if not file.endswith('.mcfunction'):
-                    continue
-
-                # Actually compile it
-                functions[file.removesuffix('.mcfunction')] = compile_file(file)
-
-    else:
-        functions[path] = compile_file(path)
+        functions[func] = compile_file(filename, func)
+        compiled.append(func)
 
     return functions
 
@@ -682,6 +880,10 @@ def write_file(outfile, data:bytes):
     with open(outfile, 'wb') as f:
         f.write(data)
 
+def write_value(exe, data, bytes):
+    exe.write(len(data).to_bytes(bytes, 'big'))
+    exe.write(data)
+
 def create_executable(functions: dict[str, bytes], namespace: str):
     exe = BytesIO()
 
@@ -692,26 +894,26 @@ def create_executable(functions: dict[str, bytes], namespace: str):
     # Namespace
     ns_bytes = namespace.encode('utf-8')
     if len(ns_bytes) > 255:
-        raise ValueError("Namespace too long.")
+        log.fatal(f"Namespace too long. [{len(ns_bytes)/255}]")
+        exit(1)
+
     exe.write(len(ns_bytes).to_bytes(1, 'big'))
     exe.write(ns_bytes)
 
     # Write function count as 2 bytes.
     exe.write(len(functions).to_bytes(2, 'big'))
     for name, data in functions.items():
-        name_bytes = name.encode('utf-8')
-        exe.write(len(name_bytes).to_bytes(1, 'big'))
-        exe.write(name_bytes)
-        exe.write(len(data).to_bytes(2, 'big'))
-        exe.write(data)
+        name = name.encode('utf-8')
+        write_value(exe, name, 1)
+        write_value(exe, data, 2)
     return exe.getvalue()
 
-def print_functions(functions):
+def print_functions(functions):  # sourcery skip: use-join
     for name,data in functions.items():
         data = data.hex(' ')
         block = ''
         for i in range(0, len(data), 170):
-            block += '  ' + data[i:i+170].strip() + '\n'
+            block += f'  {data[i:i + 170].strip()}' + '\n'
         print(f"Compiled {name}:\n{block}")
 
 if __name__ == '__main__':
@@ -725,9 +927,6 @@ if __name__ == '__main__':
     # Compile
     functions:dict[str,bytes] = compile_files(namespace)
 
-    # Print all the functions (wont remove)
-    print_functions(functions)
-
     # Create binary
     binary_executable = create_executable(functions, namespace)
 
@@ -735,4 +934,4 @@ if __name__ == '__main__':
     write_file(binary_name, binary_executable)
 
     # Done
-    print(f"Compiled {namespace} to {binary_name} in namespace {namespace}")
+    log.info(f"DONE: Compiled {namespace} to {binary_name} in namespace {namespace}")

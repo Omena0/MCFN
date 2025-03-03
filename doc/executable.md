@@ -14,7 +14,7 @@ The executable binary is comprised of:
 
 The file begins with a header in the following structure:
   • **Magic Number (4 bytes):** A constant signature (`MCFN`) identifying the file as a MCFunction executable.
-  • **Version (1 byte):** The format version number (now `3`).
+  • **Version (1 byte):** The format version number (now `4`).
   • **Namespace (variable):**
       - **Namespace Length (1 byte):** Length of the namespace string.
       - **Namespace (UTF‑8):** The namespace (typically the compiled folder).

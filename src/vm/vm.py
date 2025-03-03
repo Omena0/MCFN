@@ -1,5 +1,7 @@
-from enum import IntEnum
+from string import ascii_lowercase
+from enum import IntEnum, auto
 from io import BytesIO
+import logging
 import random
 import pickle
 import struct
@@ -8,70 +10,104 @@ import math
 import sys
 import re
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 
-DEBUG = False
+level = logging.DEBUG
+
+class CustomFormatter(logging.Formatter):
+    grey = "\x1b[38;20m"
+    light_green = "\x1b[92m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    format = "%(levelname)6s: %(message)s"
+
+    FORMATS = {
+        logging.DEBUG: grey + format + reset,
+        logging.INFO: light_green + format + reset,
+        logging.WARNING: yellow + format + reset,
+        logging.ERROR: red + format + reset,
+        logging.CRITICAL: bold_red + format + reset
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+log = logging.getLogger("MCFN")
+log.setLevel(logging.DEBUG)
+
+# create console handler with a higher log level
+ch = logging.StreamHandler()
+ch.setLevel(level)
+
+ch.setFormatter(CustomFormatter())
+
+log.addHandler(ch)
 
 class Instruction(IntEnum):
     # Executor instructions (from "as <entity>" and "at <entity>")
-    execute_as = 1
-    execute_at = 2
-    positioned = 3
+    execute_as = auto()
+    execute_at = auto()
+    execute_store = auto()
+    positioned = auto()
 
     # Conditionals (commands: if block/entity/score, unless block/entity/score)
-    if_block = 4
-    if_entity = 5
-    if_score = 6
-    unless_block = 7
-    unless_entity = 8
-    unless_score = 9
+    if_block = auto()
+    if_entity = auto()
+    if_score = auto()
+    unless_block = auto()
+    unless_entity = auto()
+    unless_score = auto()
 
     # Scoreboards
-    add = 10
-    remove = 11
-    list_scores = 12
-    list_objectives = 13
-    set_score = 14
-    get = 15
-    operation = 16
-    reset = 17
+    add = auto()
+    remove = auto()
+    list_scores = auto()
+    list_objectives = auto()
+    set_score = auto()
+    get = auto()
+    operation = auto()
+    reset = auto()
 
     # Output
-    say = 18
-    tellraw = 19
+    say = auto()
+    tellraw = auto()
 
     # Blocks
-    setblock = 12
-    fill = 21
-    clone = 22
+    setblock = auto()
+    fill = auto()
+    clone = auto()
 
     # Data
-    get_block = 23
-    get_entity = 24
-    merge_block = 25
-    merge_entity = 26
+    get_block = auto()
+    get_entity = auto()
+    merge_block = auto()
+    merge_entity = auto()
 
     # Random
-    random = 27
+    random = auto()
 
     # Entities
-    summon = 28
-    kill = 29
+    summon = auto()
+    kill = auto()
 
     # Tag
-    tag_add = 30
-    tag_remove = 31
+    tag_add = auto()
+    tag_remove = auto()
 
     # Return
-    return_ = 32
-    return_fail = 33
-    return_run = 34
+    return_ = auto()
+    return_fail = auto()
+    return_run = auto()
 
     # Kill branch
-    kill_branch = 35
+    kill_branch = auto()
 
     # Function execution: creates a new branch to run a function immediately.
-    run_func = 36
+    run_func = auto()
 
 def parse_instructions(bytecode: bytes) -> list:
     """
@@ -107,10 +143,12 @@ def parse_instructions(bytecode: bytes) -> list:
             except UnicodeDecodeError:
                 arg_text = arg_data.hex()
             # If the instruction is tellraw, attempt to parse JSON text format.
-            if instr_name == "tellraw":
-                # Check if the argument appears to be a compiled JSON text format.
-                if arg_text and ord(arg_text[0]) in (0, 1, 2, 3):
-                    arg_text = parse_json_text_format(arg_data)
+            if (
+                    instr_name == "tellraw"
+                    and arg_text
+                    and ord(arg_text[0]) in {0, 1, 2, 3}
+                ):
+                arg_text = parse_json_text_format(arg_data)
             args.append(arg_text)
         instructions.append((instr_name, args))
     return instructions
@@ -210,6 +248,7 @@ def parse_executable(bytecode: bytes) -> tuple:
     return namespace, functions
 
 def parse_json_text_format(data: bytes) -> dict | list[dict]:
+    # sourcery skip: low-code-quality
     """
     Parses the binary JSON text format used for tellraw commands into a structure
     that follows the standard Minecraft JSON text component format.
@@ -469,30 +508,41 @@ def print_json_text(text:dict | list[dict], recursed=False):
 
 # Vars
 
-branches = [] # Branches of execution
+branches = []
+branchId = 0
 
 blocks = {}
 entities = []
 scoreboards = {}
 
 class Branch:
-    def __init__(
-            self,
+    def __init__(self,
             executor='SERVER',
             position=(0,0,0),
             facing=(0,0),
-            program_counter=-1                 # Incremented before instruction is ran
+            program_counter=-1,  # Incremented before instruction is run
+            caller=None
         ):
-        self.executor = executor               # Executor entity, default SERVER
-        self.position = position               # X, Y, Z
-        self.facing = facing                   # Yaw, Pitch
-        self.program = []                      # List of instructions and args
-        self.program_counter = program_counter # Program counter
-        self.id = len(branches)
+        global branchId
 
-        if self.id > 1000:
-            raise RuntimeError("Maximum number of branches exceeded")
+        self.executor = executor
+        self.position = position
+        self.facing = facing
+        self.program = []
+        self.program_counter = program_counter
+        self.id = branchId
+        branchId += 1
 
+        # NEW: store pending execute_store info and result from the previous instruction.
+        self.pending_store = None   # Will be set as (store_type, target, objective)
+        self.last_value    = 0
+        self.caller:Branch = caller # Branch which cloned this branch
+
+        # List of variable values. Use varname_to_int() to get the index based on the variable letter(s)
+        self.vars = []
+
+        if self.id == 10000:
+            log.warning("There are 10 000 branches, you probably should fix that..")
         branches.append(self)
 
     def execute_one(self):
@@ -504,11 +554,16 @@ class Branch:
 
         inst, args = self.program[self.program_counter]
 
-        if DEBUG: print(self.id, inst, args)
+        log.debug(f'{"  "*self.id}{inst} {str(args).strip("[]")}')
 
-        do_yield = execute_instruction(self, inst, args)
+        result = execute_instruction(self, inst, args)
 
-        return do_yield
+        if isinstance(result, tuple):
+            # Capture the returned value for later use in execute_store.
+            self.last_value = result[1]
+            return result[0]
+        else:
+            return result
 
     def skip_over(self):
         """Skip over the next kill_branch instruction."""
@@ -518,6 +573,11 @@ class Branch:
                 break
 
             self.program_counter += 1
+
+    def new(self, executor='SERVER', position=(0,0,0), facing=(0,0), program_counter=-1):
+        """Create a new branch."""
+
+        return Branch(executor, position, facing, program_counter, self)
 
     def clone(self, executor=None, position=None, facing=None, program_counter=None):
         """Clone this branch and return it with the selected attributes modified."""
@@ -533,10 +593,17 @@ class Branch:
         if program_counter is None:
             program_counter = self.program_counter
 
-        return Branch(executor, position, facing, program_counter)
+        return self.new(executor, position, facing, program_counter, self)
 
     def kill(self):
-        """Kill the branch and stop execution"""
+        # Process any pending store before killing the branch.
+        if self.pending_store is not None:
+            store_type, target, objective = self.pending_store
+            value = int(self.last_value) if store_type == "result" else (1 if self.last_value else 0)
+            if objective not in scoreboards:
+                scoreboards[objective] = {}
+            scoreboards[objective][target] = value
+            self.pending_store = None
         branches.remove(self)
         self.program_counter = None
         self.executor = None
@@ -550,7 +617,7 @@ def eval_target_selector(branch: Branch, selector: str) -> str:
     """Find all entities that match a selector and return their ids"""
     global entities
 
-    # If the selector doesn't start with '@', raise.
+    # If the selector doesn't start with '@', return
     if not selector.startswith('@'):
         return [selector]
 
@@ -818,29 +885,68 @@ def match_nbt(filter_nbt, target_nbt) -> bool:
                 return False
     return True
 
+def varname_to_int(varname: str) -> int:
+    """
+    Converts a variable name in the format $<varname> to an integer.
+    The conversion is done by summing the ASCII values of each character in <varname>.
+    """
+    try: return sum((ascii_lowercase.index(char)+1)*(len(ascii_lowercase)**i) for i,char in enumerate(varname.lower())) - 1
+    except Exception as e:
+        raise ValueError(f'Invalid varname: {varname}') from e
+
 def execute_instruction(branch:Branch, inst, args):
+    for i,arg in enumerate(args):
+        if str(arg).startswith('$'):
+            var = arg.removeprefix('$(').removesuffix(')')
+            var = varname_to_int(var)
+            if len(branch.vars) <= var:
+                raise RuntimeError(f'Variable index out of range: {var}, {branch.vars}')
+            args[i] = branch.vars[var]
+
     match inst:
-        # Control flow shit
         case "execute_as":
             executors = eval_target_selector(branch, args[0])
-
             for executor in executors:
                 branch.clone(executor=executor)
-
-            # Skip over the next kill_branch.
             branch.skip_over()
 
         case "execute_at":
             entity = eval_target_selector(branch, args[0])[0]
-            if entity == 'SERVER':
-                position = (0,0,0)
-            else:
-                position = entity['Pos']
-
+            position = (0,0,0) if entity == 'SERVER' else entity['Pos']
             branch.clone(position=position)
-
-            # Skip over the next kill_branch.
             branch.skip_over()
+
+        case "execute_store":
+            # Args: store_type, target, objective.
+            store_type, target, objective = args
+            # Instead of modifying the scoreboard immediately,
+            # record the store request on this branch.
+            branch.pending_store = (store_type, target, objective)
+
+        case "kill_branch":
+            if branch.pending_store is not None:
+                store_type, target, objective = branch.pending_store
+                # Use the value of the last executed instruction.
+                value = int(branch.last_value) if store_type == "result" else bool(branch.last_value)
+                if objective not in scoreboards:
+                    scoreboards[objective] = {}
+                scoreboards[objective][target] = value
+                branch.pending_store = None
+
+            if branch.id == 0:
+                return False
+
+            branch.kill()
+            return True  # Yield
+
+        case "get":
+            target = eval_target_selector(branch, args[0])[0]
+            objective = args[1]
+            if objective not in scoreboards:
+                scoreboards[objective] = {}
+            if target not in scoreboards[objective]:
+                scoreboards[objective][target] = 0
+            return None, scoreboards[objective][target]
 
         case "positioned":
             branch.position = eval_position(branch, *args[:3])
@@ -905,7 +1011,9 @@ def execute_instruction(branch:Branch, inst, args):
                 elif operator in {"!=", "<>"}:
                     cond = value != comp_value
                 else:
-                    raise ValueError(f"Unknown relational operator: {operator}")
+                    raise ValueError(
+                        f"Unknown relational operator: {operator}"
+                    )
                 if not cond:
                     branch.skip_over()
             else:
@@ -937,8 +1045,9 @@ def execute_instruction(branch:Branch, inst, args):
                 if target not in scoreboards[objective]:
                     scoreboards[objective][target] = 0
                 value = scoreboards[objective][target]
-                if (start <= value < end):
+                if start <= value < end:
                     branch.skip_over()
+
             # Relational mode: compare two scores.
             elif len(args) == 5:
                 target = eval_target_selector(branch, args[0])[0]
@@ -971,30 +1080,14 @@ def execute_instruction(branch:Branch, inst, args):
                 elif operator in {"!=", "<>"}:
                     cond = value != comp_value
                 else:
-                    raise ValueError(f"Unknown relational operator: {operator}")
+                    raise ValueError(
+                        f"Unknown relational operator: {operator}"
+                    )
                 if cond:
                     branch.skip_over()
             else:
                 raise ValueError("Invalid argument count for unless_score")
 
-        case "run_func":
-            # Expect the function name as the first argument.
-            func_name = args[0]
-            full_func_name = f"{namespace}/{func_name}"
-            if full_func_name not in functions:
-                raise RuntimeError(f"Function {full_func_name} not found.")
-
-            # Create a new Branch and assign its program.
-            new_branch = Branch()
-            new_branch.program = functions[full_func_name]
-
-            return True # Yield
-
-        case "kill_branch":
-            branch.kill()
-            return True # Yield
-
-        # Output
         case "say":
             executor = branch.executor
             if executor != 'SERVER':
@@ -1005,7 +1098,6 @@ def execute_instruction(branch:Branch, inst, args):
         case "tellraw":
             print_json_text(args[0])
 
-        # Scoreboards
         case "add":
             target = eval_target_selector(branch, args[0])[0]
             objective = args[1]
@@ -1024,10 +1116,16 @@ def execute_instruction(branch:Branch, inst, args):
             scoreboards[objective][target] -= int(args[2])
 
         case "list_scores":
-            print(scoreboards[args[0]])
+            target = eval_target_selector(branch, args[0])[0]
+            if target == '*':
+                # Count every entry in every scoreboard
+                count = sum(len(scores) for scores in scoreboards.values())
+            else:
+                count = sum(1 for scores in scoreboards.values() if target in scores)
+            return None, count
 
         case "list_objectives":
-            print(scoreboards)
+            return None, len(scoreboards)
 
         case "set_score":
             target = eval_target_selector(branch, args[0])[0]
@@ -1035,11 +1133,6 @@ def execute_instruction(branch:Branch, inst, args):
             if objective not in scoreboards:
                 scoreboards[objective] = {}
             scoreboards[objective][target] = int(args[2])
-
-        case "get":
-            objective = args[0]
-            target = eval_target_selector(branch, args[1])[0]
-            print(scoreboards[objective][target])
 
         case "operation":
             target = eval_target_selector(branch, args[0])[0]
@@ -1061,38 +1154,88 @@ def execute_instruction(branch:Branch, inst, args):
                 scoreboards[source_obj][source] = 0
 
             if operation == "=":
-                scoreboards[target_obj][target] = scoreboards[source_obj][source]
+                scoreboards[target_obj][target] = scoreboards[source_obj][
+                    source
+                ]
             elif operation == "+=":
-                scoreboards[target_obj][target] += scoreboards[source_obj][source]
+                scoreboards[target_obj][target] += scoreboards[source_obj][
+                    source
+                ]
             elif operation == "-=":
-                scoreboards[target_obj][target] -= scoreboards[source_obj][source]
+                scoreboards[target_obj][target] -= scoreboards[source_obj][
+                    source
+                ]
             elif operation == "*=":
-                scoreboards[target_obj][target] *= scoreboards[source_obj][source]
+                scoreboards[target_obj][target] *= scoreboards[source_obj][
+                    source
+                ]
             elif operation == "/=":
-                scoreboards[target_obj][target] //= scoreboards[source_obj][source]
+                scoreboards[target_obj][target] //= scoreboards[source_obj][
+                    source
+                ]
             elif operation == "%=":
-                scoreboards[target_obj][target] %= scoreboards[source_obj][source]
+                scoreboards[target_obj][target] %= scoreboards[source_obj][
+                    source
+                ]
             elif operation == "<":
-                scoreboards[target_obj][target] = min(scoreboards[target_obj][target], scoreboards[source_obj][source])
+                scoreboards[target_obj][target] = min(
+                    scoreboards[target_obj][target],
+                    scoreboards[source_obj][source],
+                )
             elif operation == ">":
-                scoreboards[target_obj][target] = max(scoreboards[target_obj][target], scoreboards[source_obj][source])
+                scoreboards[target_obj][target] = max(
+                    scoreboards[target_obj][target],
+                    scoreboards[source_obj][source],
+                )
             elif operation == "><":
-                scoreboards[target_obj][target], scoreboards[source_obj][source] = scoreboards[source_obj][source], scoreboards[target_obj][target_obj]
+                (
+                    scoreboards[target_obj][target],
+                    scoreboards[source_obj][source],
+                ) = (
+                    scoreboards[source_obj][source],
+                    scoreboards[target_obj][target_obj],
+                )
             else:
                 raise ValueError(f"Unknown operation: {operation}")
 
-        # Function
         case "run_func":
             func_name = args[0]
+            func_args = args[1:]
             full_func_name = f"{namespace}/{func_name}"
             if full_func_name not in functions:
-                raise RuntimeError(f"Function {full_func_name} not found.")
+                raise RuntimeError(f"Function {full_func_name} not found. Functions: {', '.join(functions.keys())}")
 
             # Create a new Branch and assign its program.
-            new_branch = Branch()
+            new_branch = branch.new()
             new_branch.program = functions[full_func_name]
+            new_branch.vars = func_args
 
-            return True # Yield
+            return True, new_branch.last_value  # Yield
+
+        case "return_run":
+            if branch.id == 0:
+                log.warning(f'Return run in root branch.')
+                return
+
+            if not branch.caller:
+                log.error(f'No caller to return to. {func_name}:{branch.program_counter}')
+                return
+
+            # Execute the next instruction immediately
+            result = branch.execute_one()
+
+            # Capture output
+            if isinstance(result, tuple):
+                branch.last_value = result[1]
+
+            # Return to caller
+            branch.caller.last_value = branch.last_value
+            # Terminate the current branch
+            branch.kill()
+            return True, branch.last_value
+
+        case _:
+            log.info(f'NotImplemented: {inst} {args}')
 
 def run(branch:Branch, functions:dict, namespace:str):
     # global namespace, functions
@@ -1116,5 +1259,4 @@ if __name__ == "__main__":
     namespace, functions = parse_executable(executable)
     run(root, functions, namespace)
 
-    if DEBUG:
-        print(scoreboards)
+    log.debug(scoreboards)
