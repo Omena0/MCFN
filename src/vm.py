@@ -1,5 +1,6 @@
 from string import ascii_lowercase
 from enum import IntEnum, auto
+from time import sleep
 from io import BytesIO
 import logging
 import random
@@ -12,7 +13,7 @@ import re
 
 FORMAT_VERSION = 4
 
-level = logging.DEBUG
+level = logging.INFO
 
 class CustomFormatter(logging.Formatter):
     grey = "\x1b[38;20m"
@@ -508,6 +509,8 @@ def print_json_text(text:dict | list[dict], recursed=False):
 
 # Vars
 
+debugHook = None
+
 branches = []
 branchId = 0
 
@@ -520,8 +523,9 @@ class Branch:
             executor='SERVER',
             position=(0,0,0),
             facing=(0,0),
-            program_counter=-1,  # Incremented before instruction is run
-            caller=None
+            program_counter=0,
+            caller=None,
+            function='main'
         ):
         global branchId
 
@@ -538,6 +542,9 @@ class Branch:
         self.last_value    = 0
         self.caller:Branch = caller # Branch which cloned this branch
 
+        # Function name
+        self.function = function
+
         # List of variable values. Use varname_to_int() to get the index based on the variable letter(s)
         self.vars = []
 
@@ -546,17 +553,18 @@ class Branch:
         branches.append(self)
 
     def execute_one(self):
-        self.program_counter += 1
-
         if self.program_counter >= len(self.program):
             self.kill()
             return True
 
         inst, args = self.program[self.program_counter]
 
+
         log.debug(f'{"  "*self.id}{inst} {str(args).strip("[]")}')
 
         result = execute_instruction(self, inst, args)
+
+        self.program_counter += 1
 
         if isinstance(result, tuple):
             # Capture the returned value for later use in execute_store.
@@ -574,12 +582,12 @@ class Branch:
 
             self.program_counter += 1
 
-    def new(self, executor='SERVER', position=(0,0,0), facing=(0,0), program_counter=-1):
+    def new(self, executor='SERVER', position=(0,0,0), facing=(0,0), program_counter=-1, function='main'):
         """Create a new branch."""
 
-        return Branch(executor, position, facing, program_counter, self)
+        return Branch(executor, position, facing, program_counter, self, function)
 
-    def clone(self, executor=None, position=None, facing=None, program_counter=None):
+    def clone(self, executor=None, position=None, facing=None, program_counter=None, function=None):
         """Clone this branch and return it with the selected attributes modified."""
         if executor is None:
             executor = self.executor
@@ -593,7 +601,10 @@ class Branch:
         if program_counter is None:
             program_counter = self.program_counter
 
-        return self.new(executor, position, facing, program_counter, self)
+        if function is None:
+            function = self.function
+
+        return self.new(executor, position, facing, program_counter, self, function)
 
     def kill(self):
         # Process any pending store before killing the branch.
@@ -605,7 +616,6 @@ class Branch:
             scoreboards[objective][target] = value
             self.pending_store = None
         branches.remove(self)
-        self.program_counter = None
         self.executor = None
 
     def __str__(self):
@@ -1201,13 +1211,12 @@ def execute_instruction(branch:Branch, inst, args):
         case "run_func":
             func_name = args[0]
             func_args = args[1:]
-            full_func_name = f"{namespace}/{func_name}"
-            if full_func_name not in functions:
-                raise RuntimeError(f"Function {full_func_name} not found. Functions: {', '.join(functions.keys())}")
+            if func_name not in functions:
+                raise RuntimeError(f"Function {func_name} not found. Functions: {', '.join(functions.keys())}")
 
             # Create a new Branch and assign its program.
-            new_branch = branch.new()
-            new_branch.program = functions[full_func_name]
+            new_branch = branch.new(function=func_name)
+            new_branch.program = functions[func_name]
             new_branch.vars = func_args
 
             return True, new_branch.last_value  # Yield
@@ -1242,16 +1251,52 @@ def run(branch:Branch, functions:dict, namespace:str):
     globals()['namespace'] = namespace
     globals()['functions'] = functions
 
-    main = functions[f'{namespace}/main']
+    # Initialize the root branch with the main function
+    main = functions[f'main']
     root.program = main
 
-    while branches:
-        for branch in branches:
-            while branch in branches:
-                do_yield = branch.execute_one()
+    # Main execution loop
+    try:
+        while branches:
+            # Process all branches
+            branch_idx = 0
+            while branch_idx < len(branches):
+                branch = branches[branch_idx]
 
-                if do_yield:
-                    break
+                # Check if we should debug this branch
+                if debugHook:
+                    # Call the debug hook and handle its return value
+                    debug_result = debugHook(branch)
+
+                    # If the hook returns 'quit', exit the VM
+                    if debug_result == 'quit':
+                        return
+
+                    # If the hook returns False, pause execution and wait
+                    if not debug_result:
+                        # Avoid busy waiting by using a small sleep
+                        sleep(0.01)
+                        # Don't advance to the next branch yet
+                        continue
+
+                # Execute one instruction
+                try:
+                    do_yield = branch.execute_one()
+
+                    # If the branch yields, we need to process other branches
+                    if do_yield:
+                        break
+
+                except Exception as e:
+                    log.error(f"Error executing instruction in {branch.function}:{branch.program_counter}: {e}")
+
+                # Move to the next branch if this one is still in the list
+                branch_idx += 1
+
+    except Exception as e:
+        log.error(f"VM execution error: {e}")
+    finally:
+        log.info("VM execution terminated")
 
 
 if __name__ == "__main__":

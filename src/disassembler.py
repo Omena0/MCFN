@@ -155,6 +155,7 @@ def disassemble(bytecode: bytes) -> str:
 def disassemble_executable(data: bytes) -> str:
     stream = BytesIO(data)
     output = ['####### Executable Disassembly #######\n']
+    functions = {}
 
     header = stream.read(4)
     if len(header) < 4:
@@ -220,19 +221,21 @@ def disassemble_executable(data: bytes) -> str:
         output.append(f"## Function: {func_name} ##")
         output.append(f"  Length: {block_len} bytes")
         output.append("  Disassembly:")
-        output.append("    " + "\n    ".join(disassemble(instr_block).splitlines()))
-        
-    return "\n".join(output)
+        function = disassemble(instr_block).splitlines()
+        functions[func_name] = function
+        output.append("    " + "\n    ".join(function))
+
+    return "\n".join(output), functions
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: parser.py <executable file>")
+        print("Usage: disassembler.py <executable file>")
         sys.exit(1)
 
     with open(sys.argv[1], 'rb') as f:
         bytecode = zlib.decompress(f.read())
 
-    print(disassemble_executable(bytecode))
+    print(disassemble_executable(bytecode)[0])
 
 
 if __name__ == '__main__':
