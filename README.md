@@ -11,7 +11,7 @@ I have not tested for perfect vanilla compatibility, but the command syntax is i
 - Scoreboards
 - Entities
 - Blocks
-- I/O (no input (yet) only output so i guess its just O) 
+- I/O (no input (yet) so i guess its just O) 
 - Fully async executor by design
   - Executes multiple branches asynchronously
   - For more information you can attempt to decipher the source code
