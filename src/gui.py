@@ -4,6 +4,7 @@ from tkinter import filedialog
 from threading import Thread
 import customtkinter as tki
 import tkinter as tk
+import time
 import zlib
 import sys
 import os
@@ -13,10 +14,20 @@ VERSION = "0.0.1"
 
 branch = vm.root
 
+pending_ui_updates = {}
+is_resetting = False
+last_button_click = {}  # For debouncing
+
 class CustomRoot(tki.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         tki.CTk.__init__(self)
         self.TkdndVersion = TkinterDnD._require(self)
+
+def disassemble_file(file_path:str):
+    with open(file_path, 'rb') as f:
+        bytecode = zlib.decompress(f.read())
+
+    return disassemble_executable(bytecode)
 
 def main():
     global root
@@ -73,25 +84,9 @@ def main():
     root.status_label = status_label  # Store for updating later
 
     def drop(event):
+        global file_path
         file_path = event.data.strip('{}')  # Remove curly braces that might be added
-        print('File dropped:', file_path)
-
-        try:
-            with open(file_path, 'rb') as f:
-                bytecode = zlib.decompress(f.read())
-
-            disassembly = disassemble_executable(bytecode)[1]
-
-            # Store the current disassembly for later use (e.g., saving)
-            root.current_disassembly = disassembly
-            root.current_filename = os.path.basename(file_path)
-
-            show_disassembly(root, disassembly, os.path.basename(file_path))
-
-        except Exception as e:
-            raise e
-            print(f"Error: {e}")
-            show_error(root, f"Error: {e}")
+        set_file(root, file_path)
 
     # Register for file drops
     root.drop_target_register(DND_FILES)
@@ -118,10 +113,7 @@ def open_file(root):
 def set_file(root, file_path):
     try:
         update_status(root, f"Opening {os.path.basename(file_path)}...")
-        with open(file_path, 'rb') as f:
-            bytecode = zlib.decompress(f.read())
-
-        disassembly = disassemble_executable(bytecode)[1]
+        disassembly = disassemble_file(file_path)[1]
 
         # Store the current disassembly for later use
         root.current_disassembly = disassembly
@@ -132,9 +124,6 @@ def set_file(root, file_path):
 
     except Exception as e:
         raise e
-        print(f"Error: {e}")
-        show_error(root, f"Error: {e}")
-        update_status(root, "Error opening file")
 
 def save_disassembly(root):
     """Save the disassembly as a text file"""
@@ -210,16 +199,9 @@ def show_disassembly(root, disassembly, filename):
     """Display the disassembly in the main window with debugging features"""
     global executable, namespace, functions
 
-    # Initialize vm
-    executable = vm.read_executable(filename)
-    namespace, functions = vm.parse_executable(executable)
+    executable, namespace, functions = initialize_vm(filename)
 
-    # global namespace, functions
-    vm.namespace = namespace
-    vm.functions = functions
-
-    main = functions[f'main']
-    vm.root.program = main
+    main = functions['main']
 
     vm.debugHook = debug_hook
 
@@ -428,7 +410,6 @@ def show_disassembly(root, disassembly, filename):
     root.debug_state = {
         "pc": 0,
         "branch_count": 0,
-        "instr_count": 0,
         "breakpoints": set(),
         "running": False,
         "code_lines": code_lines,
@@ -450,31 +431,28 @@ def show_disassembly(root, disassembly, filename):
         # Get line number from click position
         index = tk_line_numbers.index(f"@{event.x},{event.y}")
         line_num = int(index.split('.')[0])
+        current_function = root.debug_state.get("current_function", "main")
 
         # First line is function name, can't set breakpoint there
-        if line_num == 1 or line_num >= len(code_lines):
+        if line_num == 1 or line_num >= len(root.debug_state["code_lines"]):
             return
 
+        # Make sure breakpoints is a dict
+        update_debug_state(root)
+
         # Toggle breakpoint
-        if line_num in root.debug_state["breakpoints"]:
+        bp_key = (current_function, line_num)
+        if bp_key in root.debug_state["breakpoints"]:
             # Remove breakpoint
-            root.debug_state["breakpoints"].remove(line_num)
-            tk_assembly_text.tag_remove("breakpoint", f"{line_num}.0", f"{line_num}.end+1c")
+            del root.debug_state["breakpoints"][bp_key]
+            root.debug_state["tk_assembly_text"].tag_remove("breakpoint", f"{line_num}.0", f"{line_num}.end+1c")
         else:
             # Add breakpoint
-            root.debug_state["breakpoints"].add(line_num)
-            tk_assembly_text.tag_add("breakpoint", f"{line_num}.0", f"{line_num}.end+1c")
+            root.debug_state["breakpoints"][bp_key] = True
+            root.debug_state["tk_assembly_text"].tag_add("breakpoint", f"{line_num}.0", f"{line_num}.end+1c")
 
         # Update breakpoints list
         update_breakpoints_list(root)
-
-        # Enable editing temporarily to make changes
-        assembly_text.configure(state="normal")
-        line_numbers.configure(state="normal")
-
-        # Restore read-only state
-        assembly_text.configure(state="disabled")
-        line_numbers.configure(state="disabled")
 
     # Bind click event to line numbers
     tk_line_numbers.bind("<Button-1>", line_click)
@@ -491,6 +469,9 @@ def update_breakpoints_list(root):
     if not hasattr(root, 'debug_state'):
         return
 
+    # Make sure breakpoints is a dict
+    update_debug_state(root)
+
     breakpoints_list = root.debug_state["breakpoints_list"]
     code_lines = root.debug_state["code_lines"]
 
@@ -501,75 +482,457 @@ def update_breakpoints_list(root):
     if not root.debug_state["breakpoints"]:
         breakpoints_list.insert("1.0", "No breakpoints set")
     else:
-        for bp in sorted(root.debug_state["breakpoints"]):
-            if 1 <= bp < len(code_lines):
-                func, instr = code_lines[bp-1]
-                breakpoints_list.insert("end", f"Line {bp}: {instr}\n")
+        # Sort breakpoints by function name and line number
+        sorted_breakpoints = sorted(root.debug_state["breakpoints"].keys())
+        for func, line_num in sorted_breakpoints:
+            if 1 <= line_num < len(code_lines) and code_lines[line_num-1]:
+                instruction = root.current_disassembly[func][line_num-2]  # -1 for 0-index, -1 for header
+                breakpoints_list.insert("end", f"{func}:{line_num}: {instruction}\n")
 
     breakpoints_list.configure(state="disabled")
 
+def initialize_vm(filename):
+    """Initialize the VM with the executable read and namespace/functions parsed."""
+    executable = vm.read_executable(filename)
+    namespace, functions = vm.parse_executable(executable)
+    vm.namespace = namespace
+    vm.functions = functions
+    return executable, namespace, functions
+
+
 # Debugging control functions
 
-quit = None
+def signal(signal:str):
+    """Send a signal to the debug hook"""
+    global signals
+    signals.append(signal)
+
 last_pc = 0
+signals = ['update']
 execution_lock = 0
 last_function = 'main'
-def debug_hook(branch: vm.Branch) -> bool:
+step_over_target = None
+skip_current_breakpoint = False
+def debug_hook(branch: vm.Branch, message_in:str=None) -> bool:
     """
     Debug hook function called by the VM before executing each instruction.
-
-    Returns:
-        - True: Continue execution
-        - False: Pause execution (wait)
-        - 'quit': Terminate the VM
+    Must be thread-safe and handle UI updates properly.
     """
-    global execution_lock, quit, last_function, last_pc, root
+    global execution_lock, last_function, last_pc
+    global root, signals, skip_current_breakpoint
+    global step_over_target
+
+    # Check if we've reached step over target
+    if step_over_target and branch.function == step_over_target[0] and branch.program_counter == step_over_target[1]:
+        # We've reached the target, pause execution
+        execution_lock = 0
+        step_over_target = None  # Reset the target
+        if root and hasattr(root, 'debug_state'):
+            root.debug_state["status_var"].set("Paused")
+            update_status(root, "Step over complete")
 
     # Make the current branch available globally for inspection
-    globals()["branch"] = branch
+    # But in a thread-safe way
+    def update_ui():
+        global last_function, last_pc
+        if not hasattr(root, 'debug_state'):
+            return
 
-    # Update the UI with the current execution state
-    if hasattr(root, 'debug_state'):
-        # Update basic branch info
-        root.debug_state["pc"] = branch.program_counter
+        # Store current values
+        current_pc = branch.program_counter
+        current_function = branch.function
+
+        # Cache branch information in the debug_state
+        root.debug_state["pc"] = current_pc
         root.debug_state["branch_count"] = len(vm.branches)
-        root.debug_state["running"] = bool(execution_lock != 0)
+        root.debug_state["running"] = execution_lock != 0
+        root.debug_state["current_branch"] = branch  # Store reference to current branch
 
         # Update UI elements
         if "pc_var" in root.debug_state:
-            root.debug_state["pc_var"].set(str(branch.program_counter))
+            root.debug_state["pc_var"].set(str(current_pc))
         if "branch_var" in root.debug_state:
             root.debug_state["branch_var"].set(str(len(vm.branches)))
 
-        # Track instructions executed
-        if "instr_count" in root.debug_state and (branch.function != last_function or branch.program_counter != last_pc):
-            root.debug_state["instr_count"] += 1
-
-        # Check if the current position has changed
-        if branch.function != last_function or branch.program_counter != last_pc:
-            # Update the highlighted line in the UI
-            update_execution_pointer(root, branch.program_counter)
-
-            # Update the UI
+        # Check if we need to update the function view first
+        if current_function != last_function:
+            update_disassembly_view(root, current_function)
+        else:
+            # PC may or may not have changed, but always update pointer
+            update_execution_pointer(root, current_pc)
             root.update_idletasks()
 
-    # Update tracking variables
-    last_function = branch.function
-    last_pc = branch.program_counter
+        # Update tracking variables - AFTER using them for comparison
+        last_function = current_function
+        last_pc = current_pc
 
-    # Handle execution control
-    if quit is not None:
-        # Reset the quit flag and terminate VM
-        temp = quit
-        quit = None
-        return temp
+    # First handle any messages
+    if message_in:
+        vm.log.debug(f'Received message: {message_in}')
+        if message_in == 'quit':
+            _complete_reset(root)
 
-    # If execution_lock is positive, decrement it (for step mode)
+    # Process outgoing messages first for more responsive UI
+    while signals:
+        signal = signals.pop(0)
+        print(f'Signal: {signal}')
+
+        # If we're resetting, only process reset or update signals
+        if is_resetting and signal not in ['reset', 'update']:
+            print(f"Ignoring signal {signal} during reset")
+            continue
+
+        if signal == 'pause':
+            # Pause execution
+            execution_lock = 0
+            if root and hasattr(root, 'debug_state'):
+                root.debug_state["status_var"].set("Paused")
+                update_status(root, "Paused execution")
+
+        elif signal == 'step':
+            # Step execution
+            execution_lock = 1
+            if root and hasattr(root, 'debug_state'):
+                root.debug_state["status_var"].set("Stepping")
+                update_status(root, "Stepping execution")
+
+        elif signal == 'step_over':
+            # Get current instruction to check if it's a function call
+            if branch.program_counter < len(branch.program):
+
+                # Set target for where to pause (current function, next instruction)
+                step_over_target = (branch.function, branch.program_counter + 1)
+
+                # Continue execution until we hit the target
+                execution_lock = -1
+
+                if root and hasattr(root, 'debug_state'):
+                    root.debug_state["status_var"].set("Stepping Over")
+                    update_status(root, "Stepping over")
+
+        elif signal == 'continue':
+            execution_lock = -1
+            if root and hasattr(root, 'debug_state'):
+                root.debug_state["status_var"].set("Running")
+                update_status(root, "Continued execution")
+
+        elif signal == 'reset':
+            vm.log.debug('Resetting VM')
+            signals.clear()
+            return 'quit'
+
+        elif signal == 'update':
+            # Always process update signals
+            root.after(0, update_ui)
+
+    # Schedule UI updates on the main thread
+    try:
+        if ( # Dont update when stepping over function
+                root and (
+                    branch.program_counter != last_pc
+                     or branch.function != last_function
+                ) and not step_over_target
+            ):
+            root.after(0, update_ui)
+    except Exception as e:
+        print(f"Error scheduling UI update: {e}")
+
+    # Store a global reference to the branch (needed for manual inspection)
+    globals()["branch"] = branch
+
+    # If execution_lock is positive, decrement it
     if execution_lock > 0:
         execution_lock -= 1
+        return True
 
     # Return true if we should continue executing (non-zero execution_lock)
-    return bool(execution_lock != 0)
+    return execution_lock != 0
+
+def show_breakpoint_info(root, branch):
+    """Show detailed state information when a breakpoint is hit"""
+
+    # Create a new window
+    info_window = tki.CTkToplevel(root)
+    info_window.title(f"Breakpoint at {branch.function}:{branch.program_counter}")
+    info_window.geometry("700x600")
+
+    # Create a notebook (tabbed interface)
+    notebook_frame = tki.CTkFrame(info_window)
+    notebook_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    # Create tabs using buttons and frames
+    tab_buttons_frame = tki.CTkFrame(notebook_frame)
+    tab_buttons_frame.pack(fill="x", pady=5)
+
+    tab_content_frame = tki.CTkFrame(notebook_frame)
+    tab_content_frame.pack(fill="both", expand=True, pady=5)
+
+    # Create frames for each tab
+    scoreboards_frame = tki.CTkFrame(tab_content_frame)
+    entities_frame = tki.CTkFrame(tab_content_frame)
+    branch_frame = tki.CTkFrame(tab_content_frame)
+    stack_frame = tki.CTkFrame(tab_content_frame)
+
+    # Active tab tracking
+    active_tab = tk.StringVar(value="scoreboards")
+
+    def show_tab(tab_name):
+        # Hide all tabs
+        scoreboards_frame.pack_forget()
+        entities_frame.pack_forget()
+        branch_frame.pack_forget()
+        stack_frame.pack_forget()
+
+        # Update active tab
+        active_tab.set(tab_name)
+
+        # Show selected tab
+        if tab_name == "scoreboards":
+            scoreboards_frame.pack(fill="both", expand=True)
+        elif tab_name == "entities":
+            entities_frame.pack(fill="both", expand=True)
+        elif tab_name == "branch":
+            branch_frame.pack(fill="both", expand=True)
+        elif tab_name == "stack":
+            stack_frame.pack(fill="both", expand=True)
+
+        # Update button colors
+        for btn in tab_buttons:
+            # Use cget() instead of dictionary access
+            if btn.cget("text").lower() == tab_name:
+                btn.configure(fg_color="#1F6AA5")
+            else:
+                btn.configure(fg_color="transparent")
+
+    # Create tab buttons
+    tab_buttons = []
+    for tab_name in ["Scoreboards", "Entities", "Branch", "Stack"]:
+        btn = tki.CTkButton(
+            tab_buttons_frame,
+            text=tab_name,
+            command=lambda t=tab_name.lower(): show_tab(t),
+            fg_color="transparent" if tab_name.lower() != active_tab.get() else "#1F6AA5",
+            hover_color="#2A8AC0",
+            corner_radius=0,
+            border_width=0,
+            height=30
+        )
+        btn.pack(side="left", fill="x", expand=True)
+        tab_buttons.append(btn)
+
+    # Fill the Scoreboards tab
+    tki.CTkLabel(scoreboards_frame, text="Scoreboards", font=("Arial", 16, "bold")).pack(anchor="w", pady=5)
+    scoreboard_list = tki.CTkTextbox(scoreboards_frame)
+    scoreboard_list.pack(fill="both", expand=True, pady=5)
+
+    # Fill scoreboard data
+    scoreboard_list.insert("end", "Scoreboard Values:\n\n")
+    if vm.scoreboards:
+        for objective, values in vm.scoreboards.items():
+            scoreboard_list.insert("end", f"Objective: {objective}\n")
+            for target, value in values.items():
+                scoreboard_list.insert("end", f"  {target}: {value}\n")
+            scoreboard_list.insert("end", "\n")
+    else:
+        scoreboard_list.insert("end", "No scoreboards defined.")
+
+    # Fill the Entities tab
+    tki.CTkLabel(entities_frame, text="Entities", font=("Arial", 16, "bold")).pack(anchor="w", pady=5)
+    entities_list = tki.CTkTextbox(entities_frame)
+    entities_list.pack(fill="both", expand=True, pady=5)
+
+    # Fill entity data
+    entities_list.insert("end", "Entities:\n\n")
+    if vm.entities:
+        for i, entity in enumerate(vm.entities):
+            entities_list.insert("end", f"Entity {i}:\n")
+            for key, value in entity.items():
+                entities_list.insert("end", f"  {key}: {value}\n")
+            entities_list.insert("end", "\n")
+    else:
+        entities_list.insert("end", "No entities defined.")
+
+    # Fill the Branch tab
+    tki.CTkLabel(branch_frame, text="Current Branch", font=("Arial", 16, "bold")).pack(anchor="w", pady=5)
+    branch_info = tki.CTkTextbox(branch_frame)
+    branch_info.pack(fill="both", expand=True, pady=5)
+
+    # Fill branch data
+    branch_info.insert("end", "Branch Information:\n\n")
+    branch_info.insert("end", f"ID: {branch.id}\n")
+    branch_info.insert("end", f"Function: {branch.function}\n")
+    branch_info.insert("end", f"Program Counter: {branch.program_counter}\n")
+    branch_info.insert("end", f"Position: {branch.position}\n")
+    branch_info.insert("end", f"Executor: {branch.executor}\n")
+    branch_info.insert("end", f"Variables: {branch.vars}\n")
+    branch_info.insert("end", f"Last Value: {branch.last_value}\n")
+    if branch.pending_store:
+        store_type, target, objective = branch.pending_store
+        branch_info.insert("end", f"Pending Store: {store_type} {target} {objective}\n")
+
+    # Fill the Stack tab
+    tki.CTkLabel(stack_frame, text="Call Stack", font=("Arial", 16, "bold")).pack(anchor="w", pady=5)
+    stack_info = tki.CTkTextbox(stack_frame)
+    stack_info.pack(fill="both", expand=True, pady=5)
+
+    # Fill stack data
+    stack_info.insert("end", "Call Stack:\n\n")
+    current = branch
+    depth = 0
+    while current:
+        stack_info.insert("end", f"[{depth}] {current.function}:{current.program_counter}\n")
+        if current.vars:
+            stack_info.insert("end", f"    Variables: {current.vars}\n")
+
+        current = current.caller
+        depth += 1
+
+    # Add control buttons
+    button_frame = tki.CTkFrame(info_window)
+    button_frame.pack(fill="x", pady=10)
+
+    # Continue
+    tki.CTkButton(
+        button_frame,
+        text="Continue",
+        command=lambda: (
+            info_window.destroy(),  # Close the window
+            continue_from_breakpoint(root)  # Call our new function instead
+        )
+    ).pack(side="left", padx=5)
+
+    tki.CTkButton(
+        button_frame,
+        text="Step",
+        command=lambda: step_execution(root)
+    ).pack(side="left", padx=5)
+
+    tki.CTkButton(
+        button_frame,
+        text="Close",
+        command=info_window.destroy
+    ).pack(side="right", padx=5)
+
+    # Show the first tab
+    show_tab(active_tab.get())
+
+def continue_from_breakpoint(root):
+    """Continue execution from a breakpoint, ignoring the current breakpoint"""
+    global execution_lock, skip_current_breakpoint, last_pc, last_function, current_position
+
+    # Set flag to skip the current breakpoint
+    skip_current_breakpoint = True
+
+    # Store the current position to avoid hitting the same breakpoint again
+    current_position = (branch.function, branch.program_counter)
+
+    # Resume execution
+    root.debug_state["running"] = True
+    root.debug_state["status_var"].set("Running")
+    execution_lock = -1
+
+    update_status(root, "Continued execution from breakpoint")
+
+def update_disassembly_view(root, function_name):
+    """Update the disassembly view to show the specified function"""
+    global pending_ui_updates, is_resetting
+
+    if not hasattr(root, 'debug_state') or not hasattr(root, 'current_disassembly'):
+        return
+
+    # If we're resetting, only allow updates to 'main' function
+    if (is_resetting or root.debug_state.get("resetting")) and function_name != 'main':
+        print(f"Skipping disassembly update for {function_name} during reset")
+        return
+
+    # Get references to the UI elements
+    assembly_text = root.debug_state.get("assembly_text")
+    tk_assembly_text = root.debug_state.get("tk_assembly_text")
+    line_numbers = root.debug_state.get("line_numbers")
+    tk_line_numbers = root.debug_state.get("tk_line_numbers")
+
+    if not assembly_text or not tk_assembly_text:
+        return
+
+    # Cancel any pending disassembly updates
+    if "disassembly_update" in pending_ui_updates:
+        root.after_cancel(pending_ui_updates["disassembly_update"])
+        pending_ui_updates.pop("disassembly_update")
+
+    # Schedule UI update on main thread to avoid race conditions
+    task_id = root.after(0, lambda: _do_update_disassembly(
+        root,
+        function_name,
+        assembly_text,
+        tk_assembly_text,
+        line_numbers,
+        tk_line_numbers
+    ))
+    pending_ui_updates["disassembly_update"] = task_id
+
+def _do_update_disassembly(root, function_name, assembly_text, tk_assembly_text, line_numbers, tk_line_numbers):
+    """Actually perform the disassembly update on the main thread"""
+    try:
+        # Enable editing
+        assembly_text.configure(state="normal")
+        line_numbers.configure(state="normal")
+
+        # Clear existing content
+        tk_assembly_text.delete("1.0", "end")
+        tk_line_numbers.delete("1.0", "end")
+
+        # Check if the function exists in the disassembly
+        if function_name in root.current_disassembly:
+            # Add function header
+            tk_assembly_text.insert("end", f"{function_name}:\n", "function_header")
+            line_num = 1
+
+            tk_line_numbers.insert("end", f"{line_num}\n")
+            line_num += 1
+                    # Reset code lines array
+            code_lines = [None]
+            # Insert instructions
+            for instruction in root.current_disassembly[function_name]:
+                line_text = f"    {instruction}\n"
+                tk_assembly_text.insert("end", line_text)
+                tk_line_numbers.insert("end", f"{line_num}\n")
+
+                # Save this code line for later reference
+                code_lines.append((function_name, instruction))
+                line_num += 1
+
+            # Store the updated code lines
+            root.debug_state["code_lines"] = code_lines
+            root.debug_state["current_function"] = function_name
+
+            # Update execution pointer highlighting for the current position
+            # Use the cached branch state rather than the global branch
+            current_pc = root.debug_state.get("pc", 0)
+            root.after(10, lambda: _do_update_execution_pointer(root, current_pc, tk_assembly_text))
+
+            # Update breakpoints
+            for bp_key in root.debug_state["breakpoints"]:
+                if isinstance(bp_key, tuple) and len(bp_key) == 2:
+                    func, bp_line = bp_key
+                    if func == function_name:
+                        try:
+                            tk_assembly_text.tag_add("breakpoint", f"{bp_line}.0", f"{bp_line}.end+1c")
+                        except Exception as e:
+                            print(f"Error adding breakpoint tag: {e}")
+        else:
+            # Function not found in disassembly
+            error_msg = f"Function '{function_name}' not found in disassembly"
+            tk_assembly_text.insert("end", error_msg)
+            root.debug_state["code_lines"] = []
+    except Exception as e:
+        print(f"Error updating disassembly: {e}")
+    finally:
+        # Restore read-only state
+        assembly_text.configure(state="disabled")
+        line_numbers.configure(state="disabled")
+
+    # Update status
+    update_status(root, f"Viewing function: {function_name}")
 
 def update_highlight(root, new_line_index):
     """
@@ -588,8 +951,11 @@ def update_highlight(root, new_line_index):
 def update_execution_pointer(root, new_line_index):
     """
     Remove all arrows and highlighting, then mark the current line.
+    Schedule this to run on the main thread to avoid race conditions.
     """
-    if not hasattr(root, 'debug_state'):
+    global pending_ui_updates, is_resetting
+
+    if not hasattr(root, 'debug_state') or is_resetting:
         return
 
     assembly_text = root.debug_state.get("assembly_text")
@@ -598,33 +964,67 @@ def update_execution_pointer(root, new_line_index):
     if not assembly_text or not tk_assembly_text:
         return
 
+    # Cancel any pending pointer updates
+    if "pointer_update" in pending_ui_updates:
+        root.after_cancel(pending_ui_updates["pointer_update"])
+        pending_ui_updates.pop("pointer_update")
+
+    # Schedule the update on the main thread
+    task_id = root.after(0, lambda: _do_update_execution_pointer(root, new_line_index, tk_assembly_text))
+    pending_ui_updates["pointer_update"] = task_id
+
+def _do_update_execution_pointer(root, new_line_index, tk_assembly_text):
+    """Actually perform the execution pointer update on the main thread"""
+    if not hasattr(root, 'debug_state'):
+        return
+
+    assembly_text = root.debug_state.get("assembly_text")
+
+    if not assembly_text:
+        return
+
     # Enable editing
     assembly_text.configure(state="normal")
 
     try:
-        # Remove current line highlighting
+        # Clear existing highlighting and arrows more safely
         tk_assembly_text.tag_remove("current_line", "1.0", "end")
+        tk_assembly_text.tag_remove("arrow", "1.0", "end")
 
-        # Find and remove all arrow characters
-        for i in range(1, int(tk_assembly_text.index('end').split('.')[0])):
-            line_text = tk_assembly_text.get(f"{i}.0", f"{i}.end")
-            if "→" in line_text:
-                arrow_idx = line_text.find("→")
-                tk_assembly_text.delete(f"{i}.{arrow_idx}", f"{i}.{arrow_idx + 2}")
+        # More aggressively remove all arrow characters
+        start_index = "1.0"
+        while True:
+            arrow_pos = tk_assembly_text.search("→", start_index, "end")
+            if not arrow_pos:
+                break
+            tk_assembly_text.delete(arrow_pos, f"{arrow_pos}+1c")
+            start_index = arrow_pos
 
         # Calculate the line number for highlighting
         # +1 for 0-based indexing, +1 for function header
         current_line = new_line_index + 2
 
+        # Safety check for line number
+        line_count = int(tk_assembly_text.index('end').split('.')[0])
+        if current_line >= line_count:
+            current_line = min(current_line, line_count-1)
+        current_line = max(current_line, 1)
+
         # Add highlighting to the current line
-        tk_assembly_text.tag_add("current_line", f"{current_line}.0", f"{current_line}.end+1c")
+        try:
+            tk_assembly_text.tag_add("current_line", f"{current_line}.0", f"{current_line}.end+1c")
 
-        # Insert the arrow at the beginning of the line
-        tk_assembly_text.insert(f"{current_line}.0", "→ ")
-        tk_assembly_text.tag_add("arrow", f"{current_line}.0", f"{current_line}.2")
+            # Insert the arrow at the beginning of the line
+            tk_assembly_text.insert(f"{current_line}.0", "→")
+            tk_assembly_text.tag_add("arrow", f"{current_line}.0", f"{current_line}.1")
 
-        # Make sure the line is visible
-        tk_assembly_text.see(f"{current_line}.0")
+            # Make sure the line is visible
+            tk_assembly_text.see(f"{current_line}.0")
+
+            # Force update the UI immediately
+            root.update_idletasks()
+        except Exception as e:
+            print(f"Error highlighting line {current_line}: {e}")
 
         # Store the current line index
         root.debug_state["current_line"] = new_line_index
@@ -633,6 +1033,26 @@ def update_execution_pointer(root, new_line_index):
     finally:
         # Restore read-only state
         assembly_text.configure(state="disabled")
+
+def update_debug_state(root):
+    """Update the debug state to use function-specific breakpoints"""
+    if not hasattr(root, 'debug_state'):
+        return
+
+    # Create breakpoints dict if it doesn't exist
+    if "breakpoints" not in root.debug_state:
+        root.debug_state["breakpoints"] = {}
+
+    elif isinstance(root.debug_state["breakpoints"], set):
+        old_breakpoints = root.debug_state["breakpoints"]
+        current_function = root.debug_state.get("current_function", "main")
+
+        new_breakpoints = {
+            (current_function, line_num): True
+            for line_num in old_breakpoints
+            if isinstance(line_num, int)
+        }
+        root.debug_state["breakpoints"] = new_breakpoints
 
 def start_execution(root):
     global execution_lock
@@ -663,114 +1083,167 @@ def pause_execution(root):
 
 def step_execution(root):
     """Execute one instruction and then pause"""
-    global execution_lock
+    global execution_lock, skip_current_breakpoint
     if not hasattr(root, 'debug_state'):
         return
 
-    # Set execution lock to allow exactly one instruction
-    execution_lock = 1
-
-    # Update UI immediately
-    if "status_var" in root.debug_state:
-        root.debug_state["status_var"].set("Stepped")
-    update_status(root, "Stepped execution")
+    # Send step message
+    signal('step')
 
 def reset_execution(root):
-    """Reset execution to beginning"""
-    global execution_lock, quit
-    if not hasattr(root, 'debug_state'):
+    """Reset execution to beginning with debouncing"""
+    global execution_lock, signals, last_button_click, is_resetting
+
+    # Prevent rapid button clicks (debouncing)
+    current_time = time.time()
+    if "reset" in last_button_click and current_time - last_button_click["reset"] < 0.5:
+        return  # Ignore clicks that happen within 0.5 seconds
+
+    last_button_click["reset"] = current_time
+
+    if not hasattr(root, 'debug_state') or is_resetting:
         return
 
     # First pause execution
     execution_lock = 0
 
-    # Signal the VM to quit and restart
-    quit = 'quit'
-
-    # Wait a moment to ensure the VM has processed the quit signal
-    root.after(100, lambda: _complete_reset(root))
+    # Signal the VM to reset (handled by debug_hook)
+    signal('reset')
 
 def _complete_reset(root):
     """Complete the reset process after the VM has stopped"""
-    global execution_lock, last_pc, last_function
+    global execution_lock, last_pc, last_function, signals
+    global signals, step_over_target, skip_current_breakpoint
+    global pending_ui_updates, is_resetting
+
+    # Set global resetting flag
+    is_resetting = True
+
+    # Clear any pending signals
+    signals = [s for s in signals if s == 'update']  # Keep only update signals
+
+    # Clear any pending UI updates - Fix the iteration error
+    # Make a copy of the keys to prevent dictionary changed size during iteration
+    update_keys = list(pending_ui_updates.keys())
+    for key in update_keys:
+        task_id = pending_ui_updates.get(key)
+        if task_id:
+            try:
+                root.after_cancel(task_id)
+            except Exception as e:
+                print(f"Error canceling task {key}: {e}")
+    pending_ui_updates.clear()
+
+    print('COMPLETE RESET CALLED')
 
     # Reset VM state
     vm.branchId = 0
-    vm.branches.clear()  # Clear all existing branches
-    vm.root = vm.Branch()  # Create a new root branch
-    vm.branches.append(vm.root)  # Add it to the branches list
+
+    # Create a new root branch
+    vm.root.kill()
+    vm.root = vm.Branch()
+    vm.branches = [vm.root]
 
     # Clear other VM state
     vm.blocks.clear()
     vm.entities.clear()
     vm.scoreboards.clear()
 
-    # Reinstall our debug hook
+    # Reinstall our debug hook (just in case)
     vm.debugHook = debug_hook
 
     # Reset execution trackers
     last_pc = 0
     last_function = 'main'
     execution_lock = 0
+    skip_current_breakpoint = False
+    step_over_target = None
 
     # Reset UI state
     if hasattr(root, 'debug_state'):
+        # Add a reset flag to prevent duplicate updates
+        root.debug_state["resetting"] = True
         root.debug_state["running"] = False
-        root.debug_state["instr_count"] = 0
         root.debug_state["pc"] = 0
         root.debug_state["branch_count"] = 0
 
-        # Update UI elements
-        if "pc_var" in root.debug_state:
-            root.debug_state["pc_var"].set("0")
-        if "branch_var" in root.debug_state:
-            root.debug_state["branch_var"].set("0")
-        if "status_var" in root.debug_state:
-            root.debug_state["status_var"].set("Reset")
+        # Update status first to show we're resetting
+        update_status(root, "Resetting execution...")
 
-        # Update highlighting for first instruction
-        update_execution_pointer(root, 0)
+        # Do a single update to refresh the view
+        def complete_ui_reset():
+            if hasattr(root, 'current_disassembly'):
+                # First update the disassembly view
+                _do_update_disassembly(
+                    root,
+                    'main',
+                    root.debug_state.get("assembly_text"),
+                    root.debug_state.get("tk_assembly_text"),
+                    root.debug_state.get("line_numbers"),
+                    root.debug_state.get("tk_line_numbers")
+                )
+                # Then update the execution pointer
+                _do_update_execution_pointer(
+                    root,
+                    0,
+                    root.debug_state.get("tk_assembly_text")
+                )
+            # Clear the reset flag
+            root.debug_state["resetting"] = False
+            # Final status update
+            update_status(root, "Reset execution complete")
+            # Allow new signals
+            global is_resetting
+            is_resetting = False
 
-    update_status(root, "Reset execution")
+        # Schedule a single UI update with sufficient delay
+        task_id = root.after(100, complete_ui_reset)
+        pending_ui_updates["complete_ui_reset"] = task_id
 
-    # Initialize the VM with the main function
-    if hasattr(vm, 'functions') and 'main' in vm.functions:
-        vm.root.program = vm.functions['main']
+    # Start the VM in a new thread after UI is updated
+    def start_vm():
+        vm.log.info('Started new vm')
+        Thread(
+            target=vm.run,
+            args=(vm.root, vm.functions, vm.namespace),
+            daemon=True
+        ).start()
+        # Only send update signal after VM is started
+        signals.append('update')
 
-    # Start the VM in a new thread
-    Thread(
-        target=vm.run,
-        args=(vm.root, vm.functions, vm.namespace),
-        daemon=True
-    ).start()
+    # Schedule VM start with delay to ensure UI updates first
+    task_id = root.after(200, start_vm)
+    pending_ui_updates["start_vm"] = task_id
 
 def step_over_execution(root):
     """Step over a function call (execute it without stepping into it)"""
     if not hasattr(root, 'debug_state'):
         return
 
-    # In a real implementation, this would need to identify function calls and skip them
-    # For now, just use the regular step function as a placeholder
-    step_execution(root)
-    update_status(root, "Stepped over")
+    # Simply send step_over message to debug_hook
+    signal('step_over')
 
 def clear_breakpoints(root):
     """Clear all breakpoints"""
     if not hasattr(root, 'debug_state'):
         return
 
+    # Make sure breakpoints is a dict
+    update_debug_state(root)
+
     assembly_text = root.debug_state["assembly_text"]
-    tk_assembly_text = root.debug_state["tk_assembly_text"]  # Get the underlying tkinter widget
+    tk_assembly_text = root.debug_state["tk_assembly_text"]
 
     # Enable editing temporarily
     assembly_text.configure(state="normal")
 
     # Remove all breakpoint highlights
-    for line_num in root.debug_state["breakpoints"]:
-        tk_assembly_text.tag_remove("breakpoint", f"{line_num}.0", f"{line_num}.end+1c")
+    for func, line_num in list(root.debug_state["breakpoints"].keys()):
+        if func == root.debug_state.get("current_function"):
+            tk_assembly_text.tag_remove("breakpoint", f"{line_num}.0", f"{line_num}.end+1c")
 
     # Clear breakpoints set
-    root.debug_state["breakpoints"] = set()
+    root.debug_state["breakpoints"].clear()
 
     # Update breakpoints list
     update_breakpoints_list(root)
@@ -824,6 +1297,10 @@ def show_info(root, message):
 def update_status(root, message):
     """Update the status bar with a message"""
     if hasattr(root, 'status_label'):
+        # Don't show intermediate function view messages during reset
+        if hasattr(root, 'debug_state') and root.debug_state.get("resetting") and "Viewing function" in message:
+            return
+
         root.status_label.configure(text=message)
         root.update_idletasks()
 

@@ -1,4 +1,4 @@
-from disasemble import disassemble_executable # type:ignore
+from disassembler import disassemble_executable
 import compiler
 import sys
 import gui
@@ -7,7 +7,7 @@ import os
 
 os.chdir(os.path.dirname(sys.argv[0]))
 
-usage = "Usage: mcfn (run | compile | disasemble) [-w <output_path>] <source_path>"
+usage = "Usage: mcfn (run | compile | disassemble) [-w <output_path>] <source_path>"
 
 def run_executable(executable):
     namespace, functions = vm.parse_executable(executable)
@@ -15,8 +15,7 @@ def run_executable(executable):
 
 def compile_executable(source_path):
     functions = compiler.compile_files(source_path)
-    executable = compiler.create_executable(functions,source_path)
-    return executable
+    return compiler.create_executable(functions,source_path)
 
 def compile_run(source_path):
     executable = compile_executable(source_path)
@@ -52,7 +51,7 @@ if __name__ == "__main__":
     elif action == "compile":
         executable = compile_executable(source_path)
 
-    elif action == "disasemble":
+    elif action == "disassemble":
         executable = read_executable(source_path)
         executable = disassemble_executable(executable)
         print(executable)
