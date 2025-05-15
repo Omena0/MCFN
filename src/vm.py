@@ -1,8 +1,6 @@
 from string import ascii_lowercase
-from enum import IntEnum, auto
 from time import sleep
 from io import BytesIO
-import logging
 import random
 import pickle
 import struct
@@ -10,105 +8,14 @@ import zlib
 import math
 import sys
 import re
-
-FORMAT_VERSION = 4
+import logging
+from common import Instruction, FORMAT_VERSION, setup_logger, STYLES
 
 level = logging.INFO
+log = setup_logger("MCFN", level)
 
-class CustomFormatter(logging.Formatter):
-    grey = "\x1b[38;20m"
-    light_green = "\x1b[92m"
-    yellow = "\x1b[33;20m"
-    red = "\x1b[31;20m"
-    bold_red = "\x1b[31;1m"
-    reset = "\x1b[0m"
-    format = "%(levelname)6s: %(message)s"
-
-    FORMATS = {
-        logging.DEBUG: grey + format + reset,
-        logging.INFO: light_green + format + reset,
-        logging.WARNING: yellow + format + reset,
-        logging.ERROR: red + format + reset,
-        logging.CRITICAL: bold_red + format + reset
-    }
-
-    def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
-        return formatter.format(record)
-
-log = logging.getLogger("MCFN")
-log.setLevel(logging.DEBUG)
-
-# create console handler with a higher log level
-ch = logging.StreamHandler()
-ch.setLevel(level)
-
-ch.setFormatter(CustomFormatter())
-
-log.addHandler(ch)
-
-class Instruction(IntEnum):
-    # Executor instructions (from "as <entity>" and "at <entity>")
-    execute_as = auto()
-    execute_at = auto()
-    execute_store = auto()
-    positioned = auto()
-
-    # Conditionals (commands: if block/entity/score, unless block/entity/score)
-    if_block = auto()
-    if_entity = auto()
-    if_score = auto()
-    unless_block = auto()
-    unless_entity = auto()
-    unless_score = auto()
-
-    # Scoreboards
-    add = auto()
-    remove = auto()
-    list_scores = auto()
-    list_objectives = auto()
-    set_score = auto()
-    get = auto()
-    operation = auto()
-    reset = auto()
-
-    # Output
-    say = auto()
-    tellraw = auto()
-
-    # Blocks
-    setblock = auto()
-    fill = auto()
-    clone = auto()
-
-    # Data
-    get_block = auto()
-    get_entity = auto()
-    merge_block = auto()
-    merge_entity = auto()
-
-    # Random
-    random = auto()
-
-    # Entities
-    summon = auto()
-    kill = auto()
-
-    # Tag
-    tag_add = auto()
-    tag_remove = auto()
-
-    # Return
-    return_ = auto()
-    return_fail = auto()
-    return_run = auto()
-
-    # Kill branch
-    kill_branch = auto()
-
-    # Function execution: creates a new branch to run a function immediately.
-    run_func = auto()
+# Initialize VM components
+root = None  # Root execution context
 
 def parse_instructions(bytecode: bytes) -> list:
     """
@@ -315,8 +222,16 @@ def parse_json_text_format(data: bytes) -> dict | list[dict]:
     else:
         return {"error": data.hex()}
 
-def _parse_json_text_with_properties(stream):
-    # Text component.
+def _parse_json_text_with_properties(stream: BytesIO) -> dict:
+    """
+    Parse a text component with formatting properties from binary stream.
+    
+    Args:
+        stream: Binary stream positioned at the start of text component data
+        
+    Returns:
+        Dictionary representing the parsed text component with its properties
+    """
     text_len = stream.read(1)[0]
     text = stream.read(text_len).decode("utf-8")
     prop_count = stream.read(1)[0]
@@ -334,7 +249,7 @@ def _parse_json_text_with_properties(stream):
             props[prop_name] = (value == 1)
     return {"text": text} | props
 
-def _extracted_from_parse_json_text_format_52(stream):
+def _extracted_from_parse_json_text_format_52(stream: BytesIO) -> dict:
     # Score component.
     name_len = stream.read(1)[0]
     name = stream.read(name_len).decode("utf-8")
@@ -366,6 +281,24 @@ def parse_range(value_str: str) -> tuple[None | int, None | int]:
     Returns:
         tuple: A tuple (start, end) where start and end are integers or None.
     """
+
+    if '..' not in value_str:
+        # Handle single numeric values
+        try:
+            # Try to parse as a simple integer
+            num = int(value_str.strip())
+            return num, num
+        except ValueError:
+            # If it has brackets, try to strip them first
+            try:
+                stripped = value_str.strip()
+                if stripped.startswith('[') and stripped.endswith(']'):
+                    num = int(stripped[1:-1].strip())
+                    return num, num
+            except ValueError:
+                pass
+        raise ValueError(f"Invalid range specification: {value_str}")
+
     range_parts = value_str.split('..')
     if len(range_parts) != 2:
         raise ValueError(f"Invalid range specification: {value_str}")
@@ -376,20 +309,45 @@ def parse_range(value_str: str) -> tuple[None | int, None | int]:
             return s[1:-1].strip()
         return s
 
+    # Parse start value
     start_str = strip_brackets(range_parts[0])
-    end_str   = strip_brackets(range_parts[1])
-    start_value = int(start_str) if start_str != '' else None
-    end_value   = int(end_str) if end_str != '' else None
+    try:
+        start_value = int(start_str) if start_str != '' else None
+    except ValueError:
+        raise ValueError(f"Invalid range start: {range_parts[0]}")
+        
+    # Parse end value
+    end_str = strip_brackets(range_parts[1])
+    try:
+        end_value = int(end_str) if end_str != '' else None
+    except ValueError:
+        raise ValueError(f"Invalid range end: {range_parts[1]}")
+        
     return start_value, end_value
 
 def parse_nbt_filter(nbt_str: str) -> dict:
     """
     Very naive SNBT parser for use in target selectors.
-    Expects an SNBT fragment enclosed in {}.
-    For lists, it splits by commas outside brackets.
-    This parser supports simple numbers (with an optional trailing 'd' for double)
-    and strings (without quotes) and lists.
-    Note: This implementation is limited and serves only as an example.
+    
+    This function parses a simplified Minecraft NBT string format used in target selectors.
+    
+    Args:
+        nbt_str: An SNBT fragment enclosed in {} 
+        
+    Returns:
+        A dictionary representing the parsed NBT data
+        
+    Raises:
+        ValueError: If the NBT format is invalid
+    
+    Examples:
+        >>> parse_nbt_filter('{key:value,list:[1,2,3],number:42d}')
+        {'key': 'value', 'list': [1, 2, 3], 'number': 42.0}
+    
+    Note:
+        - Supports nested structures with {} and []
+        - Handles simple numbers (with optional trailing 'd' for double)
+        - Supports strings without quotes
     """
     if not (nbt_str.startswith('{') and nbt_str.endswith('}')):
         raise ValueError("NBT filter must be enclosed in { }")
@@ -867,13 +825,25 @@ def eval_position(branch:Branch, x: str, y: str, z: str) -> tuple:
         new_z = parse_coord(z, base_z)
         return (new_x, new_y, new_z)
 
-def match_nbt(filter_nbt, target_nbt) -> bool:
+def match_nbt(filter_nbt: dict, target_nbt: dict) -> bool:
     """
-    Recursively checks that every key/value in filter_nbt exists in target_nbt.
-    For lists (other than byte/long/int arrays), the order and number of elements is ignored:
-      every element in filter_nbt must appear somewhere in target_nbt.
-    For dictionaries, the match is recursive.
-    All comparisons are type-sensitive.
+    Match an NBT filter against a target NBT structure.
+    
+    This function recursively checks that every key/value in filter_nbt exists 
+    in target_nbt, supporting nested structures and lists.
+    
+    Args:
+        filter_nbt: The filter NBT dictionary that specifies what to match
+        target_nbt: The target NBT dictionary to check against
+        
+    Returns:
+        True if filter_nbt is a subset of target_nbt, False otherwise
+        
+    Special handling:
+    - For numeric arrays (all ints), exact equality is required
+    - For other lists, every element in filter_nbt must exist in target_nbt (order ignored)
+    - For dictionaries, matching is recursive
+    - All comparisons are type-sensitive
     """
     for key, f_val in filter_nbt.items():
         if key not in target_nbt:

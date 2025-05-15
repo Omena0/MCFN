@@ -1,4 +1,3 @@
-from enum import IntEnum, auto
 from io import BytesIO
 import logging
 import pickle
@@ -7,53 +6,38 @@ import zlib
 import json
 import sys
 import os
-
-os.system('')
-
-MAGIC = b'MCFN'
-FORMAT_VERSION = 4
+from common import Instruction, MAGIC, FORMAT_VERSION, setup_logger, STYLES
 
 level = logging.DEBUG
+log = setup_logger("MCFN", level)
 
-class CustomFormatter(logging.Formatter):
-    grey = "\x1b[38;20m"
-    light_green = "\x1b[92m"
-    yellow = "\x1b[33;20m"
-    red = "\x1b[31;20m"
-    bold_red = "\x1b[31;1m"
-    reset = "\x1b[0m"
-    format = "%(levelname)6s: %(message)s"
-
-    FORMATS = {
-        logging.DEBUG: grey + format + reset,
-        logging.INFO: light_green + format + reset,
-        logging.WARNING: yellow + format + reset,
-        logging.ERROR: red + format + reset,
-        logging.CRITICAL: bold_red + format + reset
-    }
-
-    def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
-        return formatter.format(record)
-
-log = logging.getLogger("MCFN")
-log.setLevel(logging.DEBUG)
-
-# create console handler with a higher log level
-ch = logging.StreamHandler()
-ch.setLevel(level)
-
-ch.setFormatter(CustomFormatter())
-
-log.addHandler(ch)
+# Logger is now set up by the setup_logger function from common.py
 
 ### Preprocessor ###
-def get_indent(line:str):
+def get_indent(line:str) -> int:
+    """
+    Calculate the indentation level of a line by counting leading spaces.
+    
+    Args:
+        line: The input line to analyze
+        
+    Returns:
+        The number of leading spaces in the line
+    """
     return len(line) - len(line.lstrip(' '))
 
 definitions = {}
-def process_line(line:str, name):
+def process_line(line:str, name:str) -> list:
+    """
+    Process a line of source code, handling preprocessor directives.
+    
+    Args:
+        line: The input line to process
+        name: Name of the source file being processed
+        
+    Returns:
+        A list of one or more processed lines
+    """
     for name, value in definitions.items():
         line = line.replace(f'?{name}', value)
 
@@ -88,7 +72,22 @@ def flatten(indented_lines, level):
         result = f'${result.strip()[1:]}'
     return result
 
-def preprocess(source:str, name:str):
+def preprocess(source:str, name:str) -> str:
+    """
+    Preprocess source code to handle indentation, line continuations, and directives.
+    
+    This function:
+    1. Processes each line for preprocessor directives
+    2. Joins lines that end with backslash line continuations
+    3. Handles indentation to create hierarchical code structure
+    
+    Args:
+        source: The source code to preprocess
+        name: Name of the source file
+        
+    Returns:
+        The preprocessed source code as a single string
+    """
     # Commands pass
     new_lines = []
     for line in source.splitlines():
@@ -138,72 +137,11 @@ def preprocess(source:str, name:str):
         if next_level is None or next_level <= level:
             out_line = " ".join(indented_lines[k].strip() for k in range(level+1) if indented_lines[k].strip())
             final_lines.append(out_line)
-    
-    # Return the final preprocessed source (using only final_lines)
+      # Return the final preprocessed source (using only final_lines)
     return '\n'.join(final_lines)
 
 ### Compiler ###
-class Instruction(IntEnum):
-    # Executor instructions (from "as <entity>" and "at <entity>")
-    execute_as = auto()
-    execute_at = auto()
-    execute_store = auto()
-    positioned = auto()
-
-    # Conditionals (commands: if block/entity/score, unless block/entity/score)
-    if_block = auto()
-    if_entity = auto()
-    if_score = auto()
-    unless_block = auto()
-    unless_entity = auto()
-    unless_score = auto()
-
-    # Scoreboards
-    add = auto()
-    remove = auto()
-    list_scores = auto()
-    list_objectives = auto()
-    set_score = auto()
-    get = auto()
-    operation = auto()
-    reset = auto()
-
-    # Output
-    say = auto()
-    tellraw = auto()
-
-    # Blocks
-    setblock = auto()
-    fill = auto()
-    clone = auto()
-
-    # Data
-    get_block = auto()
-    get_entity = auto()
-    merge_block = auto()
-    merge_entity = auto()
-
-    # Random
-    random = auto()
-
-    # Entities
-    summon = auto()
-    kill = auto()
-
-    # Tag
-    tag_add = auto()
-    tag_remove = auto()
-
-    # Return
-    return_ = auto()
-    return_fail = auto()
-    return_run = auto()
-
-    # Kill branch
-    kill_branch = auto()
-
-    # Function execution: creates a new branch to run a function immediately.
-    run_func = auto()
+# Using Instruction enum from common.py
 
 def compile_component(comp: dict) -> bytes:  # sourcery skip: low-code-quality
     """
@@ -854,7 +792,22 @@ args_map = {}
 compiled = []
 to_compile = ['main']
 def compile_files(path:str) -> dict:
-    """Compile all leaf files in a directory"""
+    """
+    Compile all .mcfunction files that need to be compiled.
+    
+    This function processes files in the to_compile list, which starts with 'main'
+    and gets expanded as function calls are discovered during compilation.
+    
+    Args:
+        path: Base directory path containing .mcfunction files
+        
+    Returns:
+        A dictionary mapping function names to their compiled bytecode
+        
+    Raises:
+        FileNotFoundError: If a required .mcfunction file is not found
+        ValueError: If compilation errors occur
+    """
     functions = {}
     while to_compile:
         func = to_compile.pop(0)
@@ -865,26 +818,88 @@ def compile_files(path:str) -> dict:
 
         filename = os.path.join(path, f'{func}.mcfunction')
         filename = filename.replace('\\','/')
+        
+        if not os.path.exists(filename):
+            log.error(f"Function file not found: {filename}")
+            raise FileNotFoundError(f"Required function file not found: {filename}")
 
         functions[func] = compile_file(filename, func)
         compiled.append(func)
 
     return functions
 
-def read_file(infile):
-    with open(infile, 'r') as f:
-        return f.read()
+def read_file(infile: str) -> str:
+    """
+    Read text content from a file.
+    
+    Args:
+        infile: Path to the file to read
+        
+    Returns:
+        The file content as a string
+        
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        PermissionError: If the file can't be read
+    """
+    try:
+        with open(infile, 'r', encoding='utf-8') as f:
+            return f.read()
+    except UnicodeDecodeError:
+        # Fall back to system default encoding if UTF-8 fails
+        with open(infile, 'r') as f:
+            return f.read()
 
-def write_file(outfile, data:bytes):
+def write_file(outfile: str, data: bytes) -> None:
+    """
+    Compress and write binary data to a file.
+    
+    Args:
+        outfile: Path to the output file
+        data: Binary data to write
+        
+    Raises:
+        PermissionError: If the file can't be written
+    """
     data = zlib.compress(data, level=9)
     with open(outfile, 'wb') as f:
         f.write(data)
 
-def write_value(exe, data, bytes):
-    exe.write(len(data).to_bytes(bytes, 'big'))
+def write_value(exe: BytesIO, data: bytes, bytes_len: int) -> None:
+    """
+    Write a length-prefixed value to a binary stream.
+    
+    Args:
+        exe: Binary stream to write to
+        data: Actual data bytes to write
+        bytes_len: Number of bytes to use for the length prefix
+    """
+    exe.write(len(data).to_bytes(bytes_len, 'big'))
     exe.write(data)
 
-def create_executable(functions: dict[str, bytes], namespace: str):
+def create_executable(functions: dict[str, bytes], namespace: str) -> bytes:
+    """
+    Create a MCFN executable binary from compiled functions.
+    
+    The executable format is:
+    - MAGIC header (4 bytes)
+    - FORMAT_VERSION (1 byte)
+    - Namespace length (1 byte) + namespace bytes
+    - Function count (2 bytes)
+    - For each function:
+      - Function name length (1 byte) + name bytes
+      - Function data length (2 bytes) + function data
+    
+    Args:
+        functions: Dictionary mapping function names to their compiled bytecode
+        namespace: Namespace string for the executable
+        
+    Returns:
+        Complete executable as bytes
+        
+    Raises:
+        ValueError: If namespace is too long
+    """
     exe = BytesIO()
 
     # Header
@@ -894,8 +909,9 @@ def create_executable(functions: dict[str, bytes], namespace: str):
     # Namespace
     ns_bytes = namespace.encode('utf-8')
     if len(ns_bytes) > 255:
-        log.fatal(f"Namespace too long. [{len(ns_bytes)/255}]")
-        exit(1)
+        error_msg = f"Namespace too long: {len(ns_bytes)} bytes (max 255)"
+        log.error(error_msg)
+        raise ValueError(error_msg)
 
     exe.write(len(ns_bytes).to_bytes(1, 'big'))
     exe.write(ns_bytes)

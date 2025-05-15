@@ -1,75 +1,13 @@
-from enum import IntEnum, auto
 from io import BytesIO
 import struct
 import zlib
 import sys
+import logging
+from common import Instruction, FORMAT_VERSION, setup_logger, STYLES
 
-FORMAT_VERSION = 4
+log = setup_logger("MCFN_Disassembler", logging.INFO)
 
-class Instruction(IntEnum):
-    # Executor instructions (from "as <entity>" and "at <entity>")
-    execute_as = auto()
-    execute_at = auto()
-    execute_store = auto()
-    positioned = auto()
-
-    # Conditionals (commands: if block/entity/score, unless block/entity/score)
-    if_block = auto()
-    if_entity = auto()
-    if_score = auto()
-    unless_block = auto()
-    unless_entity = auto()
-    unless_score = auto()
-
-    # Scoreboards
-    add = auto()
-    remove = auto()
-    list_scores = auto()
-    list_objectives = auto()
-    set_score = auto()
-    get = auto()
-    operation = auto()
-    reset = auto()
-
-    # Output
-    say = auto()
-    tellraw = auto()
-
-    # Blocks
-    setblock = auto()
-    fill = auto()
-    clone = auto()
-
-    # Data
-    get_block = auto()
-    get_entity = auto()
-    merge_block = auto()
-    merge_entity = auto()
-
-    # Random
-    random = auto()
-
-    # Entities
-    summon = auto()
-    kill = auto()
-
-    # Tag
-    tag_add = auto()
-    tag_remove = auto()
-
-    # Return
-    return_ = auto()
-    return_fail = auto()
-    return_run = auto()
-
-    # Kill branch
-    kill_branch = auto()
-
-    # Function execution: creates a new branch to run a function immediately.
-    run_func = auto()
-
-
-STYLES = ["bold", "italic", "strikethrough", "underlined"]
+# Using Instruction enum from common.py
 
 def disassemble_json(data: bytes) -> str:
     stream = BytesIO(data)
@@ -224,8 +162,8 @@ def disassemble_executable(data: bytes) -> str:
         function = disassemble(instr_block).splitlines()
         functions[func_name] = function
         output.append("    " + "\n    ".join(function))
-
-    return "\n".join(output), functions
+    output_text = "\n".join(output)
+    return output_text
 
 def main():
     if len(sys.argv) < 2:
@@ -235,7 +173,7 @@ def main():
     with open(sys.argv[1], 'rb') as f:
         bytecode = zlib.decompress(f.read())
 
-    print(disassemble_executable(bytecode)[0])
+    print(disassemble_executable(bytecode))
 
 
 if __name__ == '__main__':

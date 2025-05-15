@@ -1,2 +1,11 @@
-nuitka
-regex
+# MCFN Project Requirements
+# Updated: May 6, 2025
+
+# Build tools
+nuitka==1.8.4
+regex==2023.10.3
+customtkinter==5.2.0
+tkinterdnd2==0.3.0
+
+# Core dependencies
+zlib==1.2.13

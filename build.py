@@ -19,11 +19,12 @@ py -m nuitka --standalone --onefile
 
 def build():
     # Move over source files
-    shutil.copy('compiler/compiler.py', 'build/compiler.py')
-    shutil.copy('disasembler/disasemble.py', 'build/disasemble.py')
-    shutil.copy('vm/vm.py', 'build/vm.py')
-    shutil.copy('launcher/mcfn.py', 'build/mcfn.py')
-    shutil.copy('gui/gui.py', 'build/gui.py')
+    shutil.copy('src/compiler.py', 'build/compiler.py')
+    shutil.copy('src/disassembler.py', 'build/disassembler.py')
+    shutil.copy('src/vm.py', 'build/vm.py')
+    shutil.copy('src/mcfn.py', 'build/mcfn.py')
+    shutil.copy('src/gui.py', 'build/gui.py')
+    shutil.copy('src/common.py', 'build/common.py')
 
     # Run compilation
     os.system(build_command)
